@@ -25,6 +25,14 @@ Transform a single creative prompt into multiple unique novel templates, full st
 - DeepSeek API (templates, story, script)
 - Runs entirely in the browser
 
+## Deploy (GitHub Pages)
+
+1. Push your code to GitHub
+2. Go to **Settings** → **Pages** (under "Code and automation")
+3. Under **Build and deployment** → **Source**: select **Deploy from a branch**
+4. **Branch**: `main` | **Folder**: `/ (root)` | **Save**
+5. Site will be live at `https://<username>.github.io/novel-text/`
+
 ## License
 
 MIT
