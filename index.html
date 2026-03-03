@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description"
+    content="AI Novel Template Generator — Create multiple novel outlines from a single creative prompt using Google Gemini AI.">
+  <title>AI Novel Template Generator</title>
+  <link rel="stylesheet" href="style.css?v=11">
+  <link rel="icon"
+    href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📚</text></svg>">
+</head>
+
+<body>
+
+  <div class="app-container">
+
+    <!-- ======== HEADER ======== -->
+    <header class="app-header">
+      <div class="logo-icon">📚</div>
+      <h1>AI Novel Template Generator</h1>
+      <p class="subtitle">Transform a single creative prompt into multiple unique novel templates powered by Google
+        Gemini AI</p>
+    </header>
+
+    <!-- ======== API KEY ======== -->
+    <section class="glass-card" style="animation-delay: 0.1s">
+      <div class="card-title">
+        <div class="icon purple">🔑</div>
+        API Configuration
+      </div>
+      <div class="form-grid">
+        <div class="form-group">
+          <label for="aiProvider">AI Provider (for templates, story, script)</label>
+          <select id="aiProvider">
+            <option value="gemini">Google Gemini</option>
+            <option value="deepseek">DeepSeek</option>
+          </select>
+        </div>
+        <div class="form-group full-width">
+          <label for="apiKey">API Key(s) <span class="required">*</span></label>
+          <div style="display:flex; gap:8px; align-items:flex-start;">
+            <textarea id="apiKey" rows="3" placeholder="Gemini: Google AI Studio. DeepSeek: platform.deepseek.com. One per line or comma-separated." autocomplete="off" style="flex:1"></textarea>
+            <button type="button" class="btn btn-secondary btn-sm" id="testApiBtn" title="Verify your API key works">Test</button>
+          </div>
+          <small class="form-hint" id="apiKeyHint">Gemini: templates + TTS. DeepSeek: templates only. Multiple keys = parallel audio.</small>
+        </div>
+        <div class="form-group full-width" id="geminiTtsKeyGroup" style="display:none">
+          <label for="geminiTtsKey">Gemini API Key (for TTS)</label>
+          <input type="password" id="geminiTtsKey" placeholder="Required for voice generation when using DeepSeek..." autocomplete="off">
+        </div>
+        <div class="form-group">
+          <label for="narratorVoice">Narrator Voice</label>
+          <select id="narratorVoice">
+            <optgroup label="★ Natural / Conversational">
+              <option value="Charon">Charon — Natural, informative (recommended)</option>
+              <option value="Schedar">Schedar — Even, calm</option>
+              <option value="Sulafat">Sulafat — Warm, friendly</option>
+              <option value="Achird">Achird — Friendly, casual</option>
+            </optgroup>
+            <optgroup label="Female">
+              <option value="Kore">Kore — Firm</option>
+              <option value="Zephyr">Zephyr — Bright</option>
+              <option value="Leda">Leda — Youthful</option>
+              <option value="Aoede">Aoede — Breezy</option>
+              <option value="Callirrhoe">Callirrhoe — Easy-going</option>
+              <option value="Despina">Despina — Smooth</option>
+              <option value="Gacrux">Gacrux — Mature</option>
+              <option value="Vindemiatrix">Vindemiatrix — Gentle</option>
+            </optgroup>
+            <optgroup label="Male">
+              <option value="Puck">Puck — Upbeat</option>
+              <option value="Fenrir">Fenrir — Excitable</option>
+              <option value="Orus">Orus — Firm</option>
+              <option value="Enceladus">Enceladus — Breathy</option>
+              <option value="Umbriel">Umbriel — Easy-going</option>
+              <option value="Algieba">Algieba — Smooth</option>
+            </optgroup>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="femaleVoice">Female Character Voice</label>
+          <select id="femaleVoice">
+            <option value="Sulafat">Sulafat — Warm (natural)</option>
+            <option value="Kore">Kore</option>
+            <option value="Zephyr">Zephyr</option>
+            <option value="Leda">Leda</option>
+            <option value="Aoede">Aoede</option>
+            <option value="Callirrhoe">Callirrhoe</option>
+            <option value="Autonoe">Autonoe</option>
+            <option value="Despina">Despina</option>
+            <option value="Erinome">Erinome</option>
+            <option value="Laomedeia">Laomedeia</option>
+            <option value="Achernar">Achernar</option>
+            <option value="Gacrux">Gacrux</option>
+            <option value="Vindemiatrix">Vindemiatrix</option>
+            <option value="Sadachbia">Sadachbia</option>
+            <option value="Sulafat">Sulafat</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="maleVoice">Male Character Voice</label>
+          <select id="maleVoice">
+            <option value="Charon">Charon — Natural (recommended)</option>
+            <option value="Puck">Puck</option>
+            <option value="Charon">Charon</option>
+            <option value="Fenrir">Fenrir</option>
+            <option value="Orus">Orus</option>
+            <option value="Enceladus">Enceladus</option>
+            <option value="Iapetus">Iapetus</option>
+            <option value="Umbriel">Umbriel</option>
+            <option value="Algieba">Algieba</option>
+            <option value="Algenib">Algenib</option>
+            <option value="Rasalgethi">Rasalgethi</option>
+            <option value="Alnilam">Alnilam</option>
+            <option value="Schedar">Schedar</option>
+            <option value="Pulcherrima">Pulcherrima</option>
+            <option value="Achird">Achird</option>
+            <option value="Zubenelgenubi">Zubenelgenubi</option>
+            <option value="Sadaltager">Sadaltager</option>
+          </select>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======== CREATIVE BRIEF ======== -->
+    <section class="glass-card" style="animation-delay: 0.2s">
+      <div class="card-title">
+        <div class="icon teal">✨</div>
+        Creative Brief
+      </div>
+      <div class="form-grid">
+        <div class="form-group">
+          <label for="numNovels">Number of Novels</label>
+          <input type="number" id="numNovels" min="1" max="10" value="3" placeholder="1-10">
+        </div>
+        <div class="form-group">
+          <label for="writingLanguage">Writing Language</label>
+          <select id="writingLanguage">
+            <option value="Vietnamese">Vietnamese (Tiếng Việt)</option>
+            <option value="English">English</option>
+            <option value="Japanese">Japanese (日本語)</option>
+            <option value="Korean">Korean (한국어)</option>
+            <option value="Chinese">Chinese (中文)</option>
+            <option value="French">French (Français)</option>
+            <option value="Spanish">Spanish (Español)</option>
+            <option value="German">German (Deutsch)</option>
+            <option value="Portuguese">Portuguese (Português)</option>
+            <option value="Thai">Thai (ภาษาไทย)</option>
+          </select>
+        </div>
+        <div class="form-group full-width">
+          <label for="masterPrompt">Master Prompt / Creative Brief <span class="required">*</span></label>
+          <textarea id="masterPrompt" class="tall"
+            placeholder="Describe the core idea, genre, themes, and what stories you want to create...&#10;&#10;Example: A dark fantasy series set in a world where emotions manifest as physical powers. Explore themes of trauma, healing, and human connection through diverse characters navigating a war between the Empathic Order and the Void Syndicate."></textarea>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======== TEMPLATE DETAILS (Collapsible) ======== -->
+    <section class="glass-card collapsible-card open" style="animation-delay: 0.3s">
+      <div class="card-title collapsible-toggle" onclick="toggleSection('templateDetails')">
+        <div class="icon pink">🎬</div>
+        Template Details
+        <span class="optional-badge">Optional</span>
+        <span class="collapse-icon" id="templateDetailsIcon">▼</span>
+      </div>
+      <div class="collapsible-body" id="templateDetails">
+        <div class="form-grid">
+          <div class="form-group full-width">
+            <label for="draftScript">Draft Script & Core Ideas</label>
+            <textarea id="draftScript"
+              placeholder="Outline the scenario, key plot points, and ideas you want to convey..."></textarea>
+          </div>
+          <div class="form-group full-width">
+            <label for="characterSystem">Character System</label>
+            <textarea id="characterSystem"
+              placeholder="Describe your character archetypes, relationships, or specific characters you want included..."></textarea>
+          </div>
+          <div class="form-group">
+            <label for="authorName">Author Name</label>
+            <input type="text" id="authorName" placeholder="Your pen name or author name">
+          </div>
+          <div class="form-group">
+            <label for="releaseDate">Release Date</label>
+            <input type="date" id="releaseDate">
+          </div>
+          <div class="form-group full-width">
+            <label for="narratorTone">Narrator Tone & Background</label>
+            <textarea id="narratorTone"
+              placeholder="Describe the narrative voice, point of view, mood, and world atmosphere...&#10;&#10;Example: First-person unreliable narrator with a sardonic wit. Dark, atmospheric tone with moments of dry humor. Setting: Neo-Victorian steampunk city shrouded in perpetual fog."></textarea>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======== REFERENCE INPUT (Collapsible) ======== -->
+    <section class="glass-card collapsible-card open" style="animation-delay: 0.4s">
+      <div class="card-title collapsible-toggle" onclick="toggleSection('referenceSection')">
+        <div class="icon green">📄</div>
+        Reference Material
+        <span class="optional-badge">Optional</span>
+        <span class="collapse-icon" id="referenceSectionIcon">▼</span>
+      </div>
+      <div class="collapsible-body" id="referenceSection">
+        <div class="form-grid">
+          <div class="form-group full-width">
+            <label for="referenceText">Reference Text / Sample Story</label>
+            <textarea id="referenceText" class="tall"
+              placeholder="Paste sample text, story excerpts, or style references here to guide the AI..."></textarea>
+          </div>
+          <div class="form-group full-width">
+            <div id="fileUploadArea" class="file-upload-area">
+              <div class="upload-icon">📁</div>
+              <p>Click or drag & drop a <strong>.txt</strong> file here to use as reference</p>
+              <div class="file-name" id="uploadFileName" style="display:none"></div>
+              <input type="file" id="refFileInput" accept=".txt">
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======== GENERATE ======== -->
+    <div class="generate-actions">
+      <button class="btn btn-primary" id="generateBtn">
+        <span class="spinner"></span>
+        <span class="btn-text">✨ Generate Novel Templates</span>
+      </button>
+    </div>
+
+    <!-- ======== PROGRESS ======== -->
+    <div class="progress-container" id="progressContainer">
+      <div class="progress-bar-bg">
+        <div class="progress-bar-fill" id="progressFill"></div>
+      </div>
+      <div class="progress-status" id="progressStatus">Preparing...</div>
+    </div>
+
+    <!-- ======== RESULTS ======== -->
+    <section class="results-section" id="resultsSection">
+      <div class="results-header">
+        <h2>📚 Generated Novels</h2>
+        <div style="display:flex; gap:12px; align-items:center;">
+          <span class="results-count" id="resultsCount"></span>
+          <button class="btn btn-secondary btn-sm" id="downloadAllBtn">📥 Download All</button>
+        </div>
+      </div>
+      <div id="novelsContainer"></div>
+    </section>
+
+  </div>
+
+  <!-- Toast Container -->
+  <div class="toast-container" id="toastContainer"></div>
+
+  <script src="app.js?v=14"></script>
+</body>
+
+</html>

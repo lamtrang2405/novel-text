@@ -1,0 +1,1765 @@
+/* ============================================
+   AI Novel Template Generator — Core Logic
+   Gemini API Integration & Novel Generation
+   ============================================ */
+
+// --- State ---
+const state = {
+  apiKey: '',
+  novels: [],
+  stories: {},
+  audioScripts: {}, // raw text for download
+  audioScriptSegments: {}, // { [index]: string[] } - editable segments for each novel
+  generatedAudio: {}, // { [novelIndex]: { [segmentIndex]: blobUrl } | { batch_0_4: blobUrl } }
+  generatedAudioBatches: {}, // { [novelIndex]: { batchKey: [indices] } } for batch playback
+  generatedScenes: {}, // { [novelIndex]: { [segmentIndex]: imageDataUrl } }
+  reviewedNovels: new Set(), // indices of templates marked "passed manual review"
+  isGenerating: false,
+  speakingSegment: null, // { audioIndex, segmentIndex } - for stopping TTS
+};
+
+// --- DOM Ready ---
+document.addEventListener('DOMContentLoaded', () => {
+  try {
+    initApp();
+  } catch (e) {
+    console.error('Init error:', e);
+    showToast('App failed to load: ' + (e?.message || 'Unknown error'), 'error');
+  }
+});
+
+function initApp() {
+  // Restore API key(s) and narrator voice from localStorage
+  const savedKeys = localStorage.getItem('gemini_api_keys') || localStorage.getItem('gemini_api_key');
+  const apiKeyEl = document.getElementById('apiKey');
+  if (savedKeys && apiKeyEl) {
+    apiKeyEl.value = savedKeys;
+    state.apiKey = getApiKeys()[0] || '';
+  }
+  const savedVoice = localStorage.getItem('narrator_voice');
+  if (savedVoice) {
+    const sel = document.getElementById('narratorVoice');
+    if (sel) sel.value = savedVoice;
+  }
+  ['narratorVoice', 'femaleVoice', 'maleVoice'].forEach(id => {
+    document.getElementById(id)?.addEventListener('change', (e) => {
+      localStorage.setItem(id, e.target.value);
+    });
+  });
+  const savedFemale = localStorage.getItem('femaleVoice');
+  const savedMale = localStorage.getItem('maleVoice');
+  if (savedFemale) document.getElementById('femaleVoice').value = savedFemale;
+  if (savedMale) document.getElementById('maleVoice').value = savedMale;
+
+  // Event listeners
+  const genBtn = document.getElementById('generateBtn');
+  if (genBtn) genBtn.addEventListener('click', handleGenerate);
+  document.getElementById('testApiBtn')?.addEventListener('click', handleTestApi);
+  document.getElementById('downloadAllBtn').addEventListener('click', handleDownloadAll);
+  document.getElementById('apiKey').addEventListener('input', (e) => {
+    const keys = getApiKeys();
+    state.apiKey = keys[0] || '';
+    localStorage.setItem('gemini_api_keys', e.target.value);
+  });
+  document.getElementById('aiProvider')?.addEventListener('change', (e) => {
+    localStorage.setItem('ai_provider', e.target.value);
+    const ttsGroup = document.getElementById('geminiTtsKeyGroup');
+    if (ttsGroup) ttsGroup.style.display = e.target.value === 'deepseek' ? 'block' : 'none';
+  });
+  const savedProvider = localStorage.getItem('ai_provider');
+  const ttsGroupEl = document.getElementById('geminiTtsKeyGroup');
+  if (savedProvider) {
+    const sel = document.getElementById('aiProvider');
+    if (sel) {
+      sel.value = savedProvider;
+      if (ttsGroupEl) ttsGroupEl.style.display = savedProvider === 'deepseek' ? 'block' : 'none';
+    }
+  }
+  const savedGeminiTts = localStorage.getItem('gemini_tts_key');
+  if (savedGeminiTts) document.getElementById('geminiTtsKey').value = savedGeminiTts;
+  document.getElementById('geminiTtsKey')?.addEventListener('input', (e) => {
+    localStorage.setItem('gemini_tts_key', e.target.value);
+  });
+
+  // File upload
+  const fileUploadArea = document.getElementById('fileUploadArea');
+  const fileInput = document.getElementById('refFileInput');
+
+  fileUploadArea.addEventListener('click', () => fileInput.click());
+  fileUploadArea.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    fileUploadArea.classList.add('dragover');
+  });
+  fileUploadArea.addEventListener('dragleave', () => {
+    fileUploadArea.classList.remove('dragover');
+  });
+  fileUploadArea.addEventListener('drop', (e) => {
+    e.preventDefault();
+    fileUploadArea.classList.remove('dragover');
+    if (e.dataTransfer.files.length) {
+      handleFileUpload(e.dataTransfer.files[0]);
+    }
+  });
+  fileInput.addEventListener('change', (e) => {
+    if (e.target.files.length) {
+      handleFileUpload(e.target.files[0]);
+    }
+  });
+}
+
+// --- File Upload ---
+function handleFileUpload(file) {
+  if (!file.name.endsWith('.txt')) {
+    showToast('Please upload a .txt file', 'error');
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    document.getElementById('referenceText').value = e.target.result;
+    document.getElementById('uploadFileName').textContent = file.name;
+    document.getElementById('uploadFileName').style.display = 'block';
+    showToast(`Loaded reference: ${file.name}`, 'success');
+  };
+  reader.readAsText(file);
+}
+
+// --- Get API keys (supports multiple: comma or newline separated) ---
+function getApiKeys() {
+  const el = document.getElementById('apiKey');
+  const raw = (el && el.value) || '';
+  const keys = raw.split(/[\s,;\n]+/).map(k => k.trim()).filter(Boolean);
+  return [...new Set(keys)];
+}
+
+// --- Get single API key for non-parallel calls (uses first key) ---
+function getApiKey() {
+  const keys = getApiKeys();
+  return keys[0] || '';
+}
+
+// --- Get selected AI provider ---
+function getAIProvider() {
+  return document.getElementById('aiProvider')?.value || 'gemini';
+}
+
+// --- Get API key(s) for TTS (always Gemini; separate field when provider is DeepSeek) ---
+function getTtsApiKey() {
+  if (getAIProvider() === 'deepseek') {
+    return document.getElementById('geminiTtsKey')?.value?.trim() || getApiKey();
+  }
+  return getApiKey();
+}
+
+function getTtsApiKeys() {
+  if (getAIProvider() === 'deepseek') {
+    const k = getTtsApiKey();
+    return k ? [k] : [];
+  }
+  return getApiKeys();
+}
+
+// --- Fetch with timeout ---
+async function fetchWithTimeout(url, options, ms = 120000) {
+  const ctrl = new AbortController();
+  const id = setTimeout(() => ctrl.abort(), ms);
+  try {
+    const r = await fetch(url, { ...options, signal: ctrl.signal });
+    return r;
+  } catch (e) {
+    if (e.name === 'AbortError') throw new Error('Request timed out after ' + (ms / 1000) + 's');
+    throw e;
+  } finally {
+    clearTimeout(id);
+  }
+}
+
+// --- Call DeepSeek API (OpenAI-compatible) ---
+async function callDeepSeekAPI(prompt, expectJson = false) {
+  const apiKey = getApiKey();
+  if (!apiKey) throw new Error('No API key. Enter your DeepSeek key in the API Key(s) field.');
+  const url = 'https://api.deepseek.com/v1/chat/completions';
+  const messages = [];
+  if (expectJson) {
+    messages.push({
+      role: 'system',
+      content: 'You are a helpful assistant. You must respond with valid JSON only. No markdown, no code fences, no extra text—just raw JSON.',
+    });
+  }
+  messages.push({ role: 'user', content: prompt });
+  const body = {
+    model: 'deepseek-chat',
+    messages,
+    temperature: expectJson ? 0.7 : 0.85,
+    max_tokens: 8192,
+  };
+  if (expectJson) body.response_format = { type: 'json_object' };
+  const response = await fetchWithTimeout(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify(body),
+  }, 120000);
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err?.error?.message || err?.message || `DeepSeek API error: ${response.status}`);
+  }
+  const data = await response.json();
+  let text = data.choices?.[0]?.message?.content?.trim();
+  if (!text) throw new Error('No content returned from DeepSeek');
+  if (expectJson) {
+    const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (jsonMatch) text = jsonMatch[1].trim();
+    else {
+      const objMatch = text.match(/\{[\s\S]*\}/);
+      if (objMatch) text = objMatch[0];
+    }
+    try {
+      return JSON.parse(text);
+    } catch (e) {
+      throw new Error('Invalid JSON from DeepSeek. Try again.');
+    }
+  }
+  return text;
+}
+
+// --- Validation ---
+function validateForm() {
+  const keys = getApiKeys();
+  const prompt = document.getElementById('masterPrompt').value.trim();
+
+  if (!keys.length) {
+    showToast('Please enter at least one API key (Gemini or DeepSeek)', 'error');
+    document.getElementById('apiKey').focus();
+    return false;
+  }
+  if (!prompt) {
+    showToast('Please enter a master prompt / creative brief', 'error');
+    document.getElementById('masterPrompt').focus();
+    return false;
+  }
+  return true;
+}
+
+// --- Collect Form Data ---
+function collectFormData() {
+  return {
+    numNovels: parseInt(document.getElementById('numNovels').value) || 3,
+    masterPrompt: document.getElementById('masterPrompt').value.trim(),
+    draftScript: document.getElementById('draftScript').value.trim(),
+    characterSystem: document.getElementById('characterSystem').value.trim(),
+    authorName: document.getElementById('authorName').value.trim() || 'Unknown Author',
+    releaseDate: document.getElementById('releaseDate').value || new Date().toISOString().split('T')[0],
+    narratorTone: document.getElementById('narratorTone').value.trim(),
+    writingLanguage: document.getElementById('writingLanguage').value,
+    referenceText: document.getElementById('referenceText').value.trim(),
+  };
+}
+
+// --- Build Prompt ---
+function buildGeminiPrompt(formData) {
+  let prompt = `You are an expert novel architect and creative writing assistant. Based on the following creative brief, generate exactly ${formData.numNovels} unique and detailed novel templates.
+
+## CREATIVE BRIEF
+**Master Prompt / Idea:** ${formData.masterPrompt}
+`;
+
+  if (formData.draftScript) {
+    prompt += `\n**Draft Script & Core Ideas:** ${formData.draftScript}`;
+  }
+  if (formData.characterSystem) {
+    prompt += `\n**Character System Notes:** ${formData.characterSystem}`;
+  }
+  if (formData.authorName) {
+    prompt += `\n**Author Name:** ${formData.authorName}`;
+  }
+  if (formData.releaseDate) {
+    prompt += `\n**Target Release Date:** ${formData.releaseDate}`;
+  }
+  if (formData.narratorTone) {
+    prompt += `\n**Narrator Tone & Background:** ${formData.narratorTone}`;
+  }
+  if (formData.writingLanguage) {
+    prompt += `\n**Writing Language:** ${formData.writingLanguage}`;
+  }
+  if (formData.referenceText) {
+    prompt += `\n**Reference Text (use as style/content inspiration):**\n${formData.referenceText.substring(0, 5000)}`;
+  }
+
+  prompt += `
+
+## OUTPUT REQUIREMENTS
+Generate exactly ${formData.numNovels} novel templates. Each novel template MUST include ALL of the following fields:
+
+1. **title** — A compelling, unique title for the novel
+2. **synopsis** — A 3-5 paragraph synopsis of the full story
+3. **draftScript** — The core scenario, script outline, and key ideas the story conveys
+4. **characters** — An array of characters, each with: name, role (protagonist/antagonist/supporting), age, description, arc (character development summary), gender ("male" or "female" for voice casting)
+5. **authorName** — "${formData.authorName}"
+6. **releaseDate** — "${formData.releaseDate}"
+7. **narratorTone** — Description of the narrative voice, POV, and tone
+8. **background** — The world/setting description and backdrop of the story
+9. **writingLanguage** — "${formData.writingLanguage}"
+10. **chapters** — An array of 5-10 chapter outlines, each with: chapterNumber, title, summary (2-3 sentences)
+11. **themes** — Array of core themes explored in the novel
+12. **genre** — Primary and secondary genres
+
+Each novel should be DISTINCT — different plot, different character dynamics, different themes — while still being inspired by the creative brief.
+
+## OUTPUT FORMAT (CRITICAL)
+You MUST return valid JSON only. No markdown code blocks, no backticks, no explanation—just the raw JSON object.
+{
+  "novels": [
+    {
+      "title": "...",
+      "synopsis": "...",
+      "draftScript": "...",
+      "characters": [
+        { "name": "...", "role": "...", "age": "...", "description": "...", "arc": "...", "gender": "female" }
+      ],
+      "authorName": "...",
+      "releaseDate": "...",
+      "narratorTone": "...",
+      "background": "...",
+      "writingLanguage": "...",
+      "chapters": [
+        { "chapterNumber": 1, "title": "...", "summary": "..." }
+      ],
+      "themes": ["...", "..."],
+      "genre": "..."
+    }
+  ]
+}`;
+
+  return prompt;
+}
+
+// --- Test API (minimal call to verify key) ---
+async function handleTestApi() {
+  const keys = getApiKeys();
+  if (!keys.length) {
+    showToast('Enter an API key first', 'error');
+    return;
+  }
+  const provider = getAIProvider();
+  const btn = document.getElementById('testApiBtn');
+  const origText = btn?.textContent;
+  if (btn) { btn.disabled = true; btn.textContent = 'Testing...'; }
+  try {
+    if (provider === 'deepseek') {
+      await callDeepSeekAPI('Reply with only: OK', false);
+      showToast('DeepSeek API: Connection OK', 'success');
+    } else {
+      const apiKey = getApiKey();
+      const models = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'];
+      let lastErr = null;
+      for (const model of models) {
+        try {
+          const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+          const r = await fetchWithTimeout(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ parts: [{ text: 'Say OK' }] }],
+              generationConfig: { maxOutputTokens: 10 },
+            }),
+          }, 15000);
+          const data = await r.json();
+          if (r.ok && data.candidates?.[0]?.content?.parts?.[0]?.text) {
+            showToast(`Gemini API (${model}): OK`, 'success');
+            return;
+          }
+          if (!r.ok) {
+            const msg = data?.error?.message || data?.message || `HTTP ${r.status}`;
+            lastErr = msg;
+            if (msg.includes('404') || msg.includes('not found') || msg.includes('Invalid model')) continue;
+            throw new Error(msg);
+          }
+        } catch (e) {
+          lastErr = e.message;
+          if (e.message.includes('404') || e.message.includes('not found') || e.message.includes('Invalid model')) continue;
+          throw e;
+        }
+      }
+      throw new Error(lastErr || 'All models failed');
+    }
+  } catch (e) {
+    const msg = e?.message || String(e);
+    showToast('API test failed: ' + msg, 'error');
+    console.error('API test error:', e);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = origText || 'Test'; }
+  }
+}
+
+// --- API Call (routes to Gemini or DeepSeek) ---
+async function callGeminiAPI(prompt) {
+  if (getAIProvider() === 'deepseek') {
+    return callDeepSeekAPI(prompt, true);
+  }
+  const apiKey = getApiKey();
+  if (!apiKey) throw new Error('No API key. Enter your Gemini key in the API Key(s) field.');
+  const models = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'];
+  let lastErr = null;
+  for (const model of models) {
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+      const response = await fetchWithTimeout(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: {
+            temperature: 0.9,
+            topP: 0.95,
+            topK: 40,
+            maxOutputTokens: 16384,
+            responseMimeType: 'application/json',
+          },
+        }),
+      }, 120000);
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        lastErr = errData?.error?.message || errData?.message || `API error: ${response.status}`;
+        if (lastErr.includes('404') || lastErr.includes('not found') || lastErr.includes('Invalid model')) continue;
+        throw new Error(lastErr);
+      }
+      const data = await response.json();
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!text) throw new Error('No content returned from Gemini API');
+      return JSON.parse(text);
+    } catch (e) {
+      lastErr = e?.message || lastErr;
+      if (e?.message?.includes('404') || e?.message?.includes('not found') || e?.message?.includes('Invalid model')) continue;
+      throw e;
+    }
+  }
+  throw new Error(lastErr || 'All Gemini models failed');
+}
+
+// --- Generate Handler ---
+async function handleGenerate() {
+  if (!validateForm()) return;
+  if (state.isGenerating) return;
+
+  state.isGenerating = true;
+  const btn = document.getElementById('generateBtn');
+  btn.classList.add('loading');
+  btn.disabled = true;
+
+  showProgress(true);
+  updateProgress(10, 'Preparing creative brief...');
+
+  try {
+    const formData = collectFormData();
+    updateProgress(25, 'Building AI prompt...');
+
+    const prompt = buildGeminiPrompt(formData);
+    const provider = getAIProvider() === 'deepseek' ? 'DeepSeek' : 'Gemini';
+    updateProgress(40, `Generating ${formData.numNovels} novel templates with ${provider}...`);
+
+    const result = await callGeminiAPI(prompt);
+    updateProgress(85, 'Processing results...');
+
+    if (!result.novels || !Array.isArray(result.novels)) {
+      throw new Error('Invalid response structure from AI');
+    }
+
+    state.novels = result.novels;
+    updateProgress(100, 'Done!');
+
+    setTimeout(() => {
+      showProgress(false);
+      renderResults(state.novels);
+      showToast(`Successfully generated ${state.novels.length} novel templates!`, 'success');
+    }, 500);
+
+  } catch (error) {
+    console.error('Generation error:', error);
+    showProgress(false);
+    let msg = error?.message || String(error);
+    if (msg === 'Failed to fetch' || msg.includes('NetworkError')) {
+      msg = 'Network error. If using file://, run: npx serve -l 3000 and open http://localhost:3000';
+    }
+    showToast('Generation failed: ' + msg, 'error');
+  } finally {
+    state.isGenerating = false;
+    btn.classList.remove('loading');
+    btn.disabled = false;
+  }
+}
+
+// --- Render Results ---
+function renderResults(novels) {
+  const section = document.getElementById('resultsSection');
+  const container = document.getElementById('novelsContainer');
+  const countEl = document.getElementById('resultsCount');
+
+  section.classList.add('active');
+  countEl.textContent = `${novels.length} novels generated`;
+  container.innerHTML = '';
+
+  novels.forEach((novel, index) => {
+    const card = createNovelCard(novel, index);
+    card.style.animationDelay = `${index * 0.1}s`;
+    container.appendChild(card);
+  });
+
+  // Attach edit sync listeners
+  attachEditSyncListeners(container);
+
+  // Scroll to results
+  section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function createNovelCard(novel, index) {
+  const card = document.createElement('div');
+  card.className = 'novel-card';
+  card.dataset.index = index;
+
+  // Characters HTML (editable)
+  let charactersHtml = '';
+  if (novel.characters && Array.isArray(novel.characters)) {
+    charactersHtml = novel.characters.map((c, ci) => `
+      <li contenteditable="true" data-novel="${index}" data-charindex="${ci}"><strong>${c.name}</strong> (${c.role}${c.age ? ', ' + c.age : ''}) — ${c.description}${c.arc ? '<br><em>Arc: ' + c.arc + '</em>' : ''}</li>
+    `).join('');
+    charactersHtml = `<ul>${charactersHtml}</ul>`;
+  }
+
+  // Chapters HTML (editable) — data attributes for syncing
+  let chaptersHtml = '';
+  if (novel.chapters && Array.isArray(novel.chapters)) {
+    chaptersHtml = novel.chapters.map((ch, ci) => `
+      <div class="chapter-item" data-novel="${index}" data-chapterindex="${ci}">
+        <span class="chapter-num">Ch.${ch.chapterNumber}</span>
+        <span class="chapter-title editable" contenteditable="true">${escapeHtml(ch.title)} — ${escapeHtml(ch.summary)}</span>
+      </div>
+    `).join('');
+  }
+
+  // Themes HTML
+  let themesHtml = '';
+  if (novel.themes && Array.isArray(novel.themes)) {
+    themesHtml = novel.themes.map(t => `<span class="theme-tag">${t}</span>`).join(' · ');
+  }
+
+  const isReviewed = state.reviewedNovels.has(index);
+  card.innerHTML = `
+    <div class="novel-card-header" onclick="toggleNovelCard(${index})">
+      <div class="novel-info">
+        <div class="novel-number">${index + 1}</div>
+        <div class="novel-title editable" contenteditable="true" data-novel="${index}" data-field="title">${escapeHtml(novel.title || 'Untitled Novel')}</div>
+      </div>
+      <div class="actions">
+        ${isReviewed
+    ? '<button class="btn btn-story btn-sm" onclick="event.stopPropagation(); generateFullStory(' + index + ')" id="storyBtn_' + index + '"><span class="spinner"></span><span class="btn-text">📖 Generate Full Story</span></button>'
+    : ''
+}
+        <button class="btn btn-secondary btn-sm review-toggle ${isReviewed ? 'reviewed' : ''}" onclick="event.stopPropagation(); toggleManualReview(${index})" title="${isReviewed ? 'Revoke manual review' : 'Mark as passed manual review'}">
+          ${isReviewed ? '✅ Passed' : '⬜ Review'}
+        </button>
+        <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); downloadNovel(${index})" title="Download template as .txt">
+          📥 Template
+        </button>
+        <span class="expand-icon">▼</span>
+      </div>
+    </div>
+    <div class="novel-card-body">
+      <div class="edit-hint">💡 Click any text field below to edit it</div>
+
+      <div class="novel-field">
+        <div class="novel-field-label">📖 Genre & Themes</div>
+        <div class="novel-field-content editable" contenteditable="true" data-novel="${index}" data-field="genre">${escapeHtml(novel.genre || 'N/A')}${themesHtml ? ' — ' + themesHtml : ''}</div>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="novel-field">
+        <div class="novel-field-label">📝 Synopsis</div>
+        <div class="novel-field-content editable" contenteditable="true" data-novel="${index}" data-field="synopsis">${escapeHtml(novel.synopsis || 'N/A')}</div>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="novel-field">
+        <div class="novel-field-label">🎬 Draft Script & Core Ideas</div>
+        <div class="novel-field-content editable" contenteditable="true" data-novel="${index}" data-field="draftScript">${escapeHtml(novel.draftScript || 'N/A')}</div>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="novel-field">
+        <div class="novel-field-label">👥 Character System</div>
+        <div class="novel-field-content">${charactersHtml || '<div contenteditable="true" class="editable">N/A</div>'}</div>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="novel-field">
+        <div class="novel-field-label">🎭 Narrator Tone</div>
+        <div class="novel-field-content editable" contenteditable="true" data-novel="${index}" data-field="narratorTone">${escapeHtml(novel.narratorTone || 'N/A')}</div>
+      </div>
+
+      <div class="novel-field">
+        <div class="novel-field-label">🌍 Background / Setting</div>
+        <div class="novel-field-content editable" contenteditable="true" data-novel="${index}" data-field="background">${escapeHtml(novel.background || 'N/A')}</div>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="novel-field">
+        <div class="novel-field-label">📚 Chapter Outline</div>
+        <div class="novel-field-content">
+          <div class="chapter-list">${chaptersHtml || 'N/A'}</div>
+        </div>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="novel-field" style="display:flex; gap: 40px; flex-wrap: wrap;">
+        <div>
+          <div class="novel-field-label">✍️ Author</div>
+          <div class="novel-field-content editable" contenteditable="true" data-novel="${index}" data-field="authorName">${escapeHtml(novel.authorName || 'N/A')}</div>
+        </div>
+        <div>
+          <div class="novel-field-label">📅 Release Date</div>
+          <div class="novel-field-content editable" contenteditable="true" data-novel="${index}" data-field="releaseDate">${escapeHtml(novel.releaseDate || 'N/A')}</div>
+        </div>
+        <div>
+          <div class="novel-field-label">🌐 Language</div>
+          <div class="novel-field-content editable" contenteditable="true" data-novel="${index}" data-field="writingLanguage">${escapeHtml(novel.writingLanguage || 'N/A')}</div>
+        </div>
+      </div>
+
+      <div class="divider"></div>
+
+      <!-- Review hint when not yet passed -->
+      ${!isReviewed ? '<div class="review-required-inline" id="reviewRequired_' + index + '"><span class="review-required-icon">📋</span> Mark as <strong>Passed Manual Review</strong> in the header to enable full story generation.</div>' : ''}
+
+      <!-- Full Story Section (populated after generation) -->
+      <div class="story-section" id="storySection_${index}" style="display:none">
+        <div class="novel-field">
+          <div class="novel-field-label">📜 Full Story <span class="editable-badge">(editable)</span></div>
+          <div class="story-content editable" contenteditable="true" id="storyContent_${index}" data-story-index="${index}"></div>
+        </div>
+        <div class="story-actions">
+          <button class="btn btn-secondary btn-sm" onclick="downloadStory(${index})">📥 Download Story .txt</button>
+          <button class="btn btn-audio btn-sm" onclick="generateAudioDramaScript(${index})" id="audioScriptBtn_${index}">
+            <span class="spinner"></span>
+            <span class="btn-text">🎙️ Generate Audio Drama Script</span>
+          </button>
+        </div>
+        <!-- Audio Drama Script (populated after generation - segments with Listen + Edit) -->
+        <div class="audio-script-section" id="audioScriptSection_${index}" style="display:none">
+          <div class="novel-field">
+            <div class="novel-field-label">🎙️ Audio Drama Script <span class="editable-badge">(edit & listen to each segment)</span></div>
+            <div class="script-segments" id="audioScriptSegments_${index}"></div>
+          </div>
+          <div class="story-actions">
+            <button class="btn btn-secondary btn-sm" onclick="downloadAudioScript(${index})">📥 Download Script .txt</button>
+            <button class="btn btn-audio btn-sm" onclick="generateAllAudio(${index})" id="generateAllAudioBtn_${index}" title="Uses multiple keys in parallel for faster generation">
+              <span class="spinner"></span>
+              <span class="btn-text">🎵 Generate Audio (parallel)</span>
+            </button>
+            <button class="btn btn-scene btn-sm" onclick="generateAllScenes(${index})" id="generateAllScenesBtn_${index}">
+              <span class="spinner"></span>
+              <span class="btn-text">🖼️ Generate Scenes</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  return card;
+}
+
+
+// --- Toggle Manual Review ---
+function toggleManualReview(index) {
+  if (state.reviewedNovels.has(index)) {
+    state.reviewedNovels.delete(index);
+  } else {
+    state.reviewedNovels.add(index);
+  }
+  // Re-render the card to show/hide Generate Full Story button
+  const container = document.getElementById('novelsContainer');
+  const card = container.querySelector(`.novel-card[data-index="${index}"]`);
+  if (card) {
+    const novel = state.novels[index];
+    const isExpanded = card.classList.contains('expanded');
+    const newCard = createNovelCard(novel, index);
+    newCard.style.animationDelay = card.style.animationDelay;
+    if (isExpanded) newCard.classList.add('expanded');
+    // Preserve story section if already generated
+    const existingStorySection = card.querySelector(`#storySection_${index}`);
+    const existingContent = card.querySelector(`#storyContent_${index}`);
+    const existingAudioSection = card.querySelector(`#audioScriptSection_${index}`);
+    const existingSegmentsContainer = card.querySelector(`#audioScriptSegments_${index}`);
+    if (existingStorySection && existingContent?.textContent) {
+      const newStorySection = newCard.querySelector(`#storySection_${index}`);
+      const newContent = newCard.querySelector(`#storyContent_${index}`);
+      if (newStorySection && newContent) {
+        newContent.textContent = existingContent.textContent;
+        newStorySection.style.display = 'block';
+      }
+      const btn = newCard.querySelector(`#storyBtn_${index}`);
+      if (btn) {
+        btn.innerHTML = '<span class="btn-text">✅ Story Generated</span>';
+        btn.disabled = true;
+      }
+    }
+    if (existingAudioSection && state.audioScriptSegments[index]?.length) {
+      const textEls = card.querySelectorAll(`.script-segment-text[data-audio-index="${index}"]`);
+      textEls.forEach(el => {
+        const sIdx = parseInt(el.dataset.segmentIndex, 10);
+        if (!isNaN(sIdx)) syncAudioSegmentEdit(index, sIdx, el.textContent || '');
+      });
+      const newAudioSection = newCard.querySelector(`#audioScriptSection_${index}`);
+      const newSegmentsContainer = newCard.querySelector(`#audioScriptSegments_${index}`);
+      if (newAudioSection && newSegmentsContainer) {
+        newAudioSection.style.display = 'block';
+        renderAudioScriptSegments(index, newSegmentsContainer, state.audioScriptSegments[index]);
+      }
+    }
+    card.replaceWith(newCard);
+    attachEditSyncListeners(container);
+  }
+  showToast(
+    state.reviewedNovels.has(index)
+      ? 'Template marked as passed manual review. You can now generate the full story.'
+      : 'Manual review revoked.',
+    'info'
+  );
+}
+
+// --- Sync edits from contenteditable back to state ---
+function attachEditSyncListeners(container) {
+  if (!container) return;
+
+  const syncEditable = (el) => {
+    const chapterItem = el.closest('.chapter-item');
+    const novelIndex = parseInt(el.dataset.novel ?? chapterItem?.dataset.novel, 10);
+    if (isNaN(novelIndex) || !state.novels[novelIndex]) return;
+
+    const field = el.dataset.field;
+    const value = el.textContent?.trim() || '';
+
+    if (field) {
+      state.novels[novelIndex][field] = value;
+      if (field === 'title') {
+        const titleEl = container.querySelector(`.novel-card[data-index="${novelIndex}"] .novel-card-header .novel-title`);
+        if (titleEl && titleEl !== el) titleEl.textContent = value || 'Untitled Novel';
+      }
+      if (field === 'genre' && value.includes(' — ')) {
+        const parts = value.split(' — ');
+        state.novels[novelIndex].genre = (parts[0] || '').trim();
+        state.novels[novelIndex].themes = (parts[1] || '')
+          .split(/[·•]/)
+          .map(t => t.trim())
+          .filter(Boolean);
+      }
+    }
+
+    const chapterIndex = chapterItem?.dataset.chapterindex;
+    if (chapterIndex !== undefined) {
+      const chIndex = parseInt(chapterIndex, 10);
+      const novel = state.novels[novelIndex];
+      if (novel.chapters && novel.chapters[chIndex]) {
+        const parts = value.split(' — ');
+        novel.chapters[chIndex].title = (parts[0] || '').trim();
+        novel.chapters[chIndex].summary = (parts[1] || value).trim();
+      }
+    }
+
+    const charIndex = el.dataset.charindex;
+    if (charIndex !== undefined) {
+      const cIndex = parseInt(charIndex, 10);
+      const novel = state.novels[novelIndex];
+      if (novel.characters && novel.characters[cIndex]) {
+        // Best-effort parse: "Name (role, age) — description. Arc: arc"
+        const text = value;
+        const match = text.match(/^(.+?)\s*\(([^)]*)\)\s*[—–-]\s*(.+)$/s);
+        if (match) {
+          novel.characters[cIndex].name = match[1].trim();
+          const roleAge = (match[2] || '').split(',');
+          novel.characters[cIndex].role = (roleAge[0] || '').trim();
+          novel.characters[cIndex].age = (roleAge[1] || '').trim();
+          let rest = (match[3] || '').trim();
+          const arcMatch = rest.match(/\bArc:\s*(.+)$/i);
+          if (arcMatch) {
+            novel.characters[cIndex].arc = arcMatch[1].trim();
+            rest = rest.replace(/\bArc:\s*.+$/i, '').trim();
+          } else {
+            novel.characters[cIndex].arc = '';
+          }
+          novel.characters[cIndex].description = rest;
+        }
+      }
+    }
+  };
+
+  container.addEventListener('blur', (e) => {
+    const el = e.target;
+    if (el.isContentEditable && (el.dataset.storyIndex !== undefined || el.dataset.audioIndex !== undefined || el.dataset.novel !== undefined || el.closest('.chapter-item[data-novel]') || el.dataset.charindex !== undefined)) {
+      const storyIndex = el.dataset.storyIndex;
+      const audioIndex = el.dataset.audioIndex;
+      const segmentIndex = el.dataset.segmentIndex;
+      if (storyIndex !== undefined) {
+        const idx = parseInt(storyIndex, 10);
+        if (!isNaN(idx)) state.stories[idx] = el.textContent || '';
+        return;
+      }
+      if (audioIndex !== undefined && segmentIndex !== undefined) {
+        const aIdx = parseInt(audioIndex, 10);
+        const sIdx = parseInt(segmentIndex, 10);
+        if (!isNaN(aIdx) && !isNaN(sIdx)) syncAudioSegmentEdit(aIdx, sIdx, el.textContent || '');
+        return;
+      }
+      if (audioIndex !== undefined && segmentIndex === undefined) {
+        const idx = parseInt(audioIndex, 10);
+        if (!isNaN(idx)) state.audioScripts[idx] = el.textContent || '';
+        return;
+      }
+      if (el.dataset.novel !== undefined || el.closest('.chapter-item[data-novel]') || el.dataset.charindex !== undefined) {
+        syncEditable(el);
+      }
+    }
+  }, true);
+
+  container.addEventListener('input', (e) => {
+    const el = e.target;
+    if (el.isContentEditable && el.dataset.field === 'title') {
+      // Live-update header title when editing in body (if there's another instance)
+      const novelIndex = parseInt(el.dataset.novel, 10);
+      if (!isNaN(novelIndex)) {
+        const headerTitle = container.querySelector(`.novel-card[data-index="${novelIndex}"] .novel-card-header .novel-title`);
+        if (headerTitle && headerTitle !== el) {
+          headerTitle.textContent = el.textContent?.trim() || 'Untitled Novel';
+        }
+      }
+    }
+  }, true);
+}
+
+// --- Toggle Card ---
+function toggleNovelCard(index) {
+  const cards = document.querySelectorAll('.novel-card');
+  cards.forEach((card) => {
+    if (parseInt(card.dataset.index) === index) {
+      card.classList.toggle('expanded');
+    }
+  });
+}
+
+// --- Download ---
+function downloadNovel(index) {
+  const novel = state.novels[index];
+  if (!novel) return;
+
+  const content = formatNovelTxt(novel, index);
+  const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `novel_${index + 1}_${sanitizeFilename(novel.title)}.txt`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  showToast(`Downloaded: ${novel.title}`, 'success');
+}
+
+function handleDownloadAll() {
+  if (!state.novels.length) {
+    showToast('No novels to download', 'error');
+    return;
+  }
+  state.novels.forEach((_, i) => {
+    setTimeout(() => downloadNovel(i), i * 300);
+  });
+}
+
+function formatNovelTxt(novel, index) {
+  let txt = '';
+  txt += `${'='.repeat(60)}\n`;
+  txt += `  NOVEL TEMPLATE #${index + 1}\n`;
+  txt += `${'='.repeat(60)}\n\n`;
+
+  txt += `TITLE: ${novel.title || 'Untitled'}\n`;
+  txt += `GENRE: ${novel.genre || 'N/A'}\n`;
+  txt += `AUTHOR: ${novel.authorName || 'N/A'}\n`;
+  txt += `RELEASE DATE: ${novel.releaseDate || 'N/A'}\n`;
+  txt += `WRITING LANGUAGE: ${novel.writingLanguage || 'N/A'}\n`;
+
+  if (novel.themes && novel.themes.length) {
+    txt += `THEMES: ${novel.themes.join(', ')}\n`;
+  }
+
+  txt += `\n${'-'.repeat(40)}\n`;
+  txt += `SYNOPSIS\n`;
+  txt += `${'-'.repeat(40)}\n`;
+  txt += `${novel.synopsis || 'N/A'}\n`;
+
+  txt += `\n${'-'.repeat(40)}\n`;
+  txt += `DRAFT SCRIPT & CORE IDEAS\n`;
+  txt += `${'-'.repeat(40)}\n`;
+  txt += `${novel.draftScript || 'N/A'}\n`;
+
+  txt += `\n${'-'.repeat(40)}\n`;
+  txt += `NARRATOR TONE\n`;
+  txt += `${'-'.repeat(40)}\n`;
+  txt += `${novel.narratorTone || 'N/A'}\n`;
+
+  txt += `\n${'-'.repeat(40)}\n`;
+  txt += `BACKGROUND / SETTING\n`;
+  txt += `${'-'.repeat(40)}\n`;
+  txt += `${novel.background || 'N/A'}\n`;
+
+  txt += `\n${'-'.repeat(40)}\n`;
+  txt += `CHARACTER SYSTEM\n`;
+  txt += `${'-'.repeat(40)}\n`;
+  if (novel.characters && novel.characters.length) {
+    novel.characters.forEach((c, i) => {
+      txt += `\n  [Character ${i + 1}]\n`;
+      txt += `  Name: ${c.name}\n`;
+      txt += `  Role: ${c.role}\n`;
+      if (c.age) txt += `  Age: ${c.age}\n`;
+      txt += `  Description: ${c.description}\n`;
+      if (c.arc) txt += `  Character Arc: ${c.arc}\n`;
+    });
+  } else {
+    txt += 'N/A\n';
+  }
+
+  txt += `\n${'-'.repeat(40)}\n`;
+  txt += `CHAPTER OUTLINE\n`;
+  txt += `${'-'.repeat(40)}\n`;
+  if (novel.chapters && novel.chapters.length) {
+    novel.chapters.forEach(ch => {
+      txt += `\n  Chapter ${ch.chapterNumber}: ${ch.title}\n`;
+      txt += `  ${ch.summary}\n`;
+    });
+  } else {
+    txt += 'N/A\n';
+  }
+
+  txt += `\n${'='.repeat(60)}\n`;
+  txt += `  Generated by AI Novel Template Generator\n`;
+  txt += `  Date: ${new Date().toLocaleDateString()}\n`;
+  txt += `${'='.repeat(60)}\n`;
+
+  return txt;
+}
+
+// --- Utilities ---
+function escapeHtml(str) {
+  if (!str) return '';
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+function sanitizeFilename(name) {
+  if (!name) return 'untitled';
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').substring(0, 50);
+}
+
+function showProgress(show) {
+  const container = document.getElementById('progressContainer');
+  if (!container) return;
+  container.classList.toggle('active', !!show);
+}
+
+function updateProgress(percent, statusText) {
+  const fill = document.getElementById('progressFill');
+  const status = document.getElementById('progressStatus');
+  if (fill) fill.style.width = `${percent}%`;
+  if (status) status.textContent = statusText;
+}
+
+function showToast(message, type = 'info') {
+  const container = document.getElementById('toastContainer');
+  if (!container) return;
+  const toast = document.createElement('div');
+  toast.className = `toast ${type}`;
+  toast.textContent = message;
+  toast.style.cssText = 'max-width:360px;';
+  container.appendChild(toast);
+  setTimeout(() => toast.remove(), 5000);
+}
+
+// --- Collapsible Section Toggle ---
+function toggleSection(sectionId) {
+  const body = document.getElementById(sectionId);
+  if (!body) return;
+  const card = body.closest('.collapsible-card');
+  if (!card) return;
+
+  const isHidden = body.style.display === 'none';
+  body.style.display = isHidden ? 'block' : 'none';
+  card.classList.toggle('open', isHidden);
+}
+
+// --- Generate Full Story ---
+async function generateFullStory(index) {
+  const novel = state.novels[index];
+  if (!novel) return;
+
+  const apiKey = getApiKey();
+  if (!apiKey) {
+    showToast('Please enter your API key first', 'error');
+    return;
+  }
+
+  const btn = document.getElementById(`storyBtn_${index}`);
+  btn.classList.add('loading');
+  btn.disabled = true;
+
+  // Auto-expand the card to show progress
+  const card = document.querySelector(`.novel-card[data-index="${index}"]`);
+  if (card && !card.classList.contains('expanded')) {
+    card.classList.add('expanded');
+  }
+
+  showToast(`Generating full story for "${novel.title}"... This may take a moment.`, 'info');
+
+  try {
+    // Build chapter details for the prompt
+    let chapterDetails = '';
+    if (novel.chapters && novel.chapters.length) {
+      chapterDetails = novel.chapters.map(ch =>
+        `Chapter ${ch.chapterNumber}: "${ch.title}" — ${ch.summary}`
+      ).join('\n');
+    }
+
+    let characterDetails = '';
+    if (novel.characters && novel.characters.length) {
+      characterDetails = novel.characters.map(c =>
+        `- ${c.name} (${c.role}): ${c.description}${c.arc ? ' | Arc: ' + c.arc : ''}`
+      ).join('\n');
+    }
+
+    const storyPrompt = `You are an expert novelist and creative writer. Write the FULL STORY for the following novel.
+
+## NOVEL DETAILS
+**Title:** ${novel.title}
+**Genre:** ${novel.genre || 'Fiction'}
+**Writing Language:** ${novel.writingLanguage || 'English'}
+**Narrator Tone:** ${novel.narratorTone || 'Third-person omniscient'}
+**Background/Setting:** ${novel.background || 'Not specified'}
+
+## SYNOPSIS
+${novel.synopsis || 'Not provided'}
+
+## DRAFT SCRIPT & CORE IDEAS
+${novel.draftScript || 'Not provided'}
+
+## CHARACTERS
+${characterDetails || 'Not specified'}
+
+## CHAPTER OUTLINE
+${chapterDetails || 'Write 5-10 chapters'}
+
+## INSTRUCTIONS
+Write the COMPLETE story following the chapter outline above. For each chapter:
+- Write a full chapter title header
+- Write detailed, engaging prose (at least 800-1500 words per chapter)
+- Use the specified narrator tone and writing style
+- Develop the characters according to their arcs
+- Include vivid descriptions, dialogue, and emotional depth
+- Write in ${novel.writingLanguage || 'English'}
+- Make the story compelling, immersive, and publish-ready
+
+Write the full story now. Output ONLY the story text with chapter headers, no meta-commentary.`;
+
+    const storyText = await callGeminiAPIRaw(storyPrompt);
+
+    // Store the story
+    state.stories[index] = storyText;
+
+    // Display it
+    const storySection = document.getElementById(`storySection_${index}`);
+    const storyContent = document.getElementById(`storyContent_${index}`);
+    storyContent.textContent = storyText;
+    storySection.style.display = 'block';
+
+    // Update button
+    btn.innerHTML = '<span class="btn-text">✅ Story Generated</span>';
+    btn.classList.remove('loading');
+
+    showToast(`Full story generated for "${novel.title}"!`, 'success');
+
+  } catch (error) {
+    console.error('Story generation error:', error);
+    showToast(`Story generation failed: ${error.message}`, 'error');
+    btn.classList.remove('loading');
+    btn.disabled = false;
+  }
+}
+
+// --- Raw text API call (for story, script — routes to Gemini or DeepSeek) ---
+async function callGeminiAPIRaw(prompt) {
+  if (getAIProvider() === 'deepseek') {
+    return callDeepSeekAPI(prompt, false);
+  }
+  const apiKey = getApiKey();
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: {
+        temperature: 0.85,
+        topP: 0.95,
+        topK: 40,
+        maxOutputTokens: 65536,
+      },
+    }),
+  });
+  if (!response.ok) {
+    const errData = await response.json().catch(() => ({}));
+    throw new Error(errData?.error?.message || `API error: ${response.status}`);
+  }
+  const data = await response.json();
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!text) throw new Error('No content returned from Gemini API');
+  return text;
+}
+
+// --- Download Full Story (uses current edited content from DOM) ---
+function downloadStory(index) {
+  const novel = state.novels[index];
+  const contentEl = document.getElementById(`storyContent_${index}`);
+  const storyText = contentEl?.textContent?.trim() || state.stories[index];
+  if (!novel || !storyText) {
+    showToast('No story to download. Generate it first.', 'error');
+    return;
+  }
+
+  let content = '';
+  content += `${'='.repeat(60)}\n`;
+  content += `  ${novel.title || 'Untitled'}\n`;
+  content += `  by ${novel.authorName || 'Unknown Author'}\n`;
+  content += `${'='.repeat(60)}\n\n`;
+  content += storyText;
+  content += `\n\n${'='.repeat(60)}\n`;
+  content += `  Generated by AI Novel Template Generator\n`;
+  content += `  Date: ${new Date().toLocaleDateString()}\n`;
+  content += `${'='.repeat(60)}\n`;
+
+  const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `story_${index + 1}_${sanitizeFilename(novel.title)}.txt`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  showToast(`Downloaded story: ${novel.title}`, 'success');
+}
+
+// --- Generate Audio Drama Script ---
+async function generateAudioDramaScript(index) {
+  const novel = state.novels[index];
+  const contentEl = document.getElementById(`storyContent_${index}`);
+  const storyText = contentEl?.textContent?.trim() || state.stories[index];
+  if (!novel || !storyText) {
+    showToast('Generate the full story first.', 'error');
+    return;
+  }
+
+  const apiKey = getApiKey();
+  if (!apiKey) {
+    showToast('Please enter your API key first', 'error');
+    return;
+  }
+
+  const btn = document.getElementById(`audioScriptBtn_${index}`);
+  btn.classList.add('loading');
+  btn.disabled = true;
+  showToast(`Generating audio drama script for "${novel.title}"...`, 'info');
+
+  try {
+    const characterNames = (novel.characters || []).map(c => c.name).filter(Boolean);
+    const characterList = (novel.characters || []).map(c => `${c.name}${c.gender ? ` (${c.gender})` : ''}`).filter(Boolean);
+    const prompt = `You are an expert audio drama and radio play scriptwriter. Convert the following novel/story into an AUDIO DRAMA SCRIPT format suitable for voice actors and audio production.
+
+## STORY TO CONVERT
+${storyText.substring(0, 40000)}
+
+## CHARACTERS (use EXACT names for dialogue labels; gender used for voice casting)
+${characterList.length ? characterList.join(', ') : characterNames.join(', ') || 'Extract from the story'}
+
+## OUTPUT FORMAT REQUIREMENTS
+Create a script with:
+
+1. **Scene headers:** [SCENE: Location/Description] or [INT. LOCATION - TIME]
+2. **Narrator lines:** NARRATOR: [text]
+3. **Character dialogue:** CHARACTER NAME: [dialogue]
+4. **Sound effects cues:** [SFX: description] 
+5. **Music cues:** [MUSIC: mood/description]
+6. **Ambience:** [AMB: environment sound]
+
+Format rules:
+- ONE logical unit per line (each line = one segment for playback)
+- One speaker per line, with name in UPPERCASE followed by colon
+- Include [SFX], [MUSIC], [AMB] as separate lines where appropriate
+- Keep prose descriptions minimal; focus on dialogue and audio cues
+- Preserve emotional beats as parentheticals (e.g., (sadly), (whispering))
+- Use single newlines between segments; no double newlines within the script
+- Write in ${novel.writingLanguage || 'English'}
+- Output ONLY the script, no meta-commentary`;
+
+    const scriptText = await callGeminiAPIRaw(prompt);
+    const segments = scriptText.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+    state.audioScriptSegments[index] = segments;
+    state.audioScripts[index] = scriptText;
+
+    const scriptSection = document.getElementById(`audioScriptSection_${index}`);
+    const segmentsContainer = document.getElementById(`audioScriptSegments_${index}`);
+    renderAudioScriptSegments(index, segmentsContainer, segments);
+    scriptSection.style.display = 'block';
+    scriptSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+    btn.innerHTML = '<span class="btn-text">✅ Script Generated</span>';
+    btn.classList.remove('loading');
+    showToast(`Audio drama script generated for "${novel.title}"!`, 'success');
+  } catch (error) {
+    console.error('Audio script generation error:', error);
+    showToast(`Script generation failed: ${error.message}`, 'error');
+    btn.classList.remove('loading');
+    btn.disabled = false;
+  }
+}
+
+// --- Find batch key for segment index (batch where segment is first) ---
+function getBatchAudioForSegment(audioIndex, segmentIndex) {
+  const batches = state.generatedAudioBatches[audioIndex] || {};
+  const audio = state.generatedAudio[audioIndex] || {};
+  for (const [key, indices] of Object.entries(batches)) {
+    if (indices[0] === segmentIndex) return { url: audio[key], key, indices };
+  }
+  return null;
+}
+
+// --- Render Audio Script Segments (each editable + Listen + Generate Audio/Scene) ---
+function renderAudioScriptSegments(audioIndex, container, segments) {
+  if (!container) return;
+  container.innerHTML = '';
+  const audioBlobs = state.generatedAudio[audioIndex] || {};
+  const sceneImages = state.generatedScenes[audioIndex] || {};
+  (segments || []).forEach((text, i) => {
+    const seg = document.createElement('div');
+    seg.className = 'script-segment';
+    seg.dataset.audioIndex = String(audioIndex);
+    seg.dataset.segmentIndex = String(i);
+    const isSceneCue = /^\[(SCENE|INT\.|EXT\.)[^\]]*\]/i.test(text);
+    const hasAudio = !!audioBlobs[i];
+    const batchInfo = getBatchAudioForSegment(audioIndex, i);
+    const hasBatchAudio = !!batchInfo;
+    const hasScene = !!sceneImages[i] && isSceneCue;
+    seg.innerHTML = `
+      <div class="script-segment-row">
+        <span class="segment-num">${i + 1}</span>
+        <div class="segment-actions">
+          <button type="button" class="btn btn-icon segment-listen" onclick="listenToSegment(${audioIndex}, ${i})" id="listenBtn_${audioIndex}_${i}" title="Listen (browser TTS)">🔊</button>
+          <button type="button" class="btn btn-icon segment-gen-audio" onclick="generateAudioForSegment(${audioIndex}, ${i})" id="genAudioBtn_${audioIndex}_${i}" title="Generate AI audio">🎵</button>
+          ${isSceneCue ? `<button type="button" class="btn btn-icon segment-gen-scene" onclick="generateSceneForSegment(${audioIndex}, ${i})" id="genSceneBtn_${audioIndex}_${i}" title="Generate scene image">🖼️</button>` : ''}
+        </div>
+        <div class="script-segment-text editable" contenteditable="true" data-audio-index="${audioIndex}" data-segment-index="${i}">${escapeHtml(text)}</div>
+      </div>
+      ${hasAudio ? `<div class="segment-generated-audio"><audio controls src="${audioBlobs[i]}" id="audioPlayer_${audioIndex}_${i}"></audio><a href="${audioBlobs[i]}" download="segment_${i + 1}.wav" class="btn btn-icon">📥</a></div>` : ''}
+      ${hasBatchAudio ? `<div class="segment-generated-audio batch-audio"><span class="batch-label">Segments ${batchInfo.indices[0] + 1}–${batchInfo.indices[batchInfo.indices.length - 1] + 1}</span><audio controls src="${batchInfo.url}" id="audioBatch_${audioIndex}_${i}"></audio><a href="${batchInfo.url}" download="batch_${batchInfo.indices[0] + 1}-${batchInfo.indices[batchInfo.indices.length - 1] + 1}.wav" class="btn btn-icon">📥</a></div>` : ''}
+      ${hasScene ? `<div class="segment-generated-scene"><img src="${sceneImages[i]}" alt="Scene ${i + 1}"/><a href="${sceneImages[i]}" download="scene_${i + 1}.png" class="btn btn-icon">📥</a></div>` : ''}
+    `;
+    container.appendChild(seg);
+  });
+}
+
+// --- TTS: Listen to a single segment ---
+function listenToSegment(audioIndex, segmentIndex) {
+  const segments = state.audioScriptSegments[audioIndex];
+  if (!segments || !segments[segmentIndex]) return;
+  const raw = segments[segmentIndex];
+  const text = stripTextForTTS(raw);
+  if (!text) return;
+
+  // Stop any current speech
+  if (state.speakingSegment) {
+    speechSynthesis.cancel();
+  }
+
+  const utterance = new SpeechSynthesisUtterance(text);
+  const novel = state.novels[audioIndex];
+  const lang = (novel?.writingLanguage || 'en').substring(0, 2).toLowerCase();
+  const langMap = { vietnamese: 'vi-VN', english: 'en-US', japanese: 'ja-JP', korean: 'ko-KR', chinese: 'zh-CN', french: 'fr-FR', spanish: 'es-ES', german: 'de-DE', portuguese: 'pt-BR', thai: 'th-TH' };
+  utterance.lang = langMap[lang] || 'en-US';
+  utterance.rate = 1;
+  utterance.pitch = 1;
+
+  state.speakingSegment = { audioIndex, segmentIndex };
+  const btn = document.getElementById(`listenBtn_${audioIndex}_${segmentIndex}`);
+  if (btn) btn.classList.add('playing');
+
+  utterance.onend = utterance.onerror = () => {
+    state.speakingSegment = null;
+    if (btn) btn.classList.remove('playing');
+  };
+
+  speechSynthesis.speak(utterance);
+}
+
+// --- Sync segment edits back to state ---
+function syncAudioSegmentEdit(audioIndex, segmentIndex, newText) {
+  if (!state.audioScriptSegments[audioIndex]) return;
+  const segs = state.audioScriptSegments[audioIndex];
+  if (segmentIndex >= 0 && segmentIndex < segs.length) {
+    segs[segmentIndex] = newText;
+    state.audioScripts[audioIndex] = segs.join('\n');
+  }
+}
+
+// --- PCM to WAV (for Gemini TTS output) ---
+function pcmToWavBlob(pcmBase64, sampleRate = 24000) {
+  const pcm = Uint8Array.from(atob(pcmBase64), c => c.charCodeAt(0));
+  const numChannels = 1;
+  const bitsPerSample = 16;
+  const byteRate = sampleRate * numChannels * (bitsPerSample / 8);
+  const dataSize = pcm.length;
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buffer);
+  let offset = 0;
+  const write = (str) => { for (let i = 0; i < str.length; i++) view.setUint8(offset++, str.charCodeAt(i)); };
+  write('RIFF');
+  view.setUint32(offset, 36 + dataSize, true); offset += 4;
+  write('WAVE');
+  write('fmt ');
+  view.setUint32(offset, 16, true); offset += 4; // chunk size
+  view.setUint16(offset, 1, true); offset += 2;  // PCM
+  view.setUint16(offset, numChannels, true); offset += 2;
+  view.setUint32(offset, sampleRate, true); offset += 4;
+  view.setUint32(offset, byteRate, true); offset += 4;
+  view.setUint16(offset, numChannels * (bitsPerSample / 8), true); offset += 2;
+  view.setUint16(offset, bitsPerSample, true); offset += 2;
+  write('data');
+  view.setUint32(offset, dataSize, true); offset += 4;
+  new Uint8Array(buffer).set(pcm, 44);
+  return new Blob([buffer], { type: 'audio/wav' });
+}
+
+// --- Strip cue labels for TTS (narrator won't read [AMB:], [SFX:], etc.) ---
+function stripTextForTTS(text) {
+  if (!text?.trim()) return '';
+  return text
+    .replace(/\[(?:AMB|SFX|MUSIC|SCENE|INT\.|EXT\.)\s*:\s*([^\]]*)\]/gim, '$1')
+    .trim();
+}
+
+// --- Parse speaker from segment (e.g. "NARRATOR: text" or "ALICE: Hello") ---
+function parseSpeakerFromSegment(segment) {
+  const m = segment.match(/^([A-Z][A-Z\s]*)\s*:\s*(.*)$/s);
+  if (!m) return { speaker: null, text: segment };
+  return { speaker: m[1].trim().toUpperCase(), text: (m[2] || '').trim() };
+}
+
+// --- Get voice for segment: narrator vs character (match gender — no male voice for female chars) ---
+function getVoiceForSegment(segmentText, novel) {
+  const { speaker } = parseSpeakerFromSegment(segmentText);
+  if (!speaker || speaker === 'NARRATOR') {
+    return document.getElementById('narratorVoice')?.value || 'Charon';
+  }
+  const chars = novel?.characters || [];
+  const speakerNorm = speaker.replace(/\s+/g, ' ').toUpperCase();
+  const char = chars.find(c => {
+    if (!c.name) return false;
+    const nameNorm = c.name.trim().toUpperCase();
+    return nameNorm === speakerNorm || speakerNorm.startsWith(nameNorm) || nameNorm.startsWith(speakerNorm);
+  });
+  const gender = (char?.gender || '').toLowerCase();
+  if (gender === 'female') {
+    return document.getElementById('femaleVoice')?.value || 'Kore';
+  }
+  if (gender === 'male') {
+    return document.getElementById('maleVoice')?.value || 'Puck';
+  }
+  return document.getElementById('narratorVoice')?.value || 'Kore';
+}
+
+// --- Throttle delay (ms) between TTS API calls to avoid rate limit (15 RPM free tier) ---
+const TTS_THROTTLE_MS = 4200;
+
+// --- Build batches for multi-speaker TTS (max 2 speakers per batch = 1 API call) ---
+function buildAudioBatches(segments, novel) {
+  const batches = [];
+  let currentBatch = { indices: [], speakers: new Set(), lines: [] };
+  const getSpeaker = (raw) => {
+    const { speaker } = parseSpeakerFromSegment(raw);
+    return speaker || 'NARRATOR';
+  };
+  const getVoice = (speaker) => {
+    if (!speaker || speaker === 'NARRATOR') return document.getElementById('narratorVoice')?.value || 'Charon';
+    const chars = novel?.characters || [];
+    const speakerNorm = speaker.replace(/\s+/g, ' ').toUpperCase();
+    const char = chars.find(c => {
+      if (!c.name) return false;
+      const nameNorm = c.name.trim().toUpperCase();
+      return nameNorm === speakerNorm || speakerNorm.startsWith(nameNorm) || nameNorm.startsWith(speakerNorm);
+    });
+    const gender = (char?.gender || '').toLowerCase();
+    if (gender === 'female') return document.getElementById('femaleVoice')?.value || 'Kore';
+    if (gender === 'male') return document.getElementById('maleVoice')?.value || 'Puck';
+    return document.getElementById('narratorVoice')?.value || 'Charon';
+  };
+  for (let i = 0; i < segments.length; i++) {
+    const raw = segments[i];
+    const text = stripTextForTTS(raw);
+    if (!text) continue;
+    const speaker = getSpeaker(raw);
+    const wouldBeNewSpeaker = !currentBatch.speakers.has(speaker);
+    const wouldExceedTwo = currentBatch.speakers.size >= 2 && wouldBeNewSpeaker;
+    if (currentBatch.indices.length > 0 && wouldExceedTwo) {
+      const prompt = currentBatch.lines.map(([s, t]) => `${s}: ${t}`).join('\n');
+      const voiceMap = {};
+      currentBatch.speakers.forEach(s => { voiceMap[s] = getVoice(s); });
+      batches.push({ indices: [...currentBatch.indices], prompt, voiceMap });
+      currentBatch = { indices: [], speakers: new Set(), lines: [] };
+    }
+    currentBatch.indices.push(i);
+    currentBatch.speakers.add(speaker);
+    const { text: lineText } = parseSpeakerFromSegment(raw);
+    currentBatch.lines.push([speaker, stripTextForTTS(raw)]);
+  }
+  if (currentBatch.indices.length > 0) {
+    const prompt = currentBatch.lines.map(([s, t]) => `${s}: ${t}`).join('\n');
+    const voiceMap = {};
+    currentBatch.speakers.forEach(s => { voiceMap[s] = getVoice(s); });
+    batches.push({ indices: [...currentBatch.indices], prompt, voiceMap });
+  }
+  return batches;
+}
+
+// --- Call Gemini Multi-Speaker TTS (batch = fewer API calls) ---
+async function callGeminiTTSMultiSpeaker(prompt, voiceMap, apiKeyOverride = null) {
+  const apiKey = apiKeyOverride || getTtsApiKey();
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`;
+  const speakers = Object.keys(voiceMap);
+  if (speakers.length === 0) throw new Error('No speakers');
+  if (speakers.length === 1) {
+    const voiceName = voiceMap[speakers[0]];
+    const cleanPrompt = prompt.replace(/^[A-Z\s]+:\s*/gm, '').trim();
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+        contents: [{ parts: [{ text: cleanPrompt }] }],
+        generationConfig: {
+          responseModalities: ['AUDIO'],
+          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } },
+        },
+      }),
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err?.error?.message || `TTS API error: ${response.status}`);
+    }
+    const data = await response.json();
+    const b64 = data.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+    if (!b64) throw new Error('No audio in TTS response');
+    return pcmToWavBlob(b64);
+  }
+  const speakerVoiceConfigs = speakers.map(speaker => ({
+    speaker,
+    voiceConfig: { prebuiltVoiceConfig: { voiceName: voiceMap[speaker] } },
+  }));
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: {
+        responseModalities: ['AUDIO'],
+        speechConfig: {
+          multiSpeakerVoiceConfig: { speakerVoiceConfigs },
+        },
+      },
+    }),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err?.error?.message || `TTS API error: ${response.status}`);
+  }
+  const data = await response.json();
+  const b64 = data.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+  if (!b64) throw new Error('No audio in TTS response');
+  return pcmToWavBlob(b64);
+}
+
+// --- Call Gemini TTS API (single segment) ---
+async function callGeminiTTS(text, novel, segmentRaw = null) {
+  const cleaned = stripTextForTTS(segmentRaw || text);
+  if (!cleaned) throw new Error('No text to speak (or segment is cue-only)');
+  const apiKey = getTtsApiKey();
+  const voiceName = getVoiceForSegment(segmentRaw || text, novel);
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`;
+  const tone = novel?.narratorTone || '';
+  const background = novel?.background || '';
+  const styleHint = [tone, background].filter(Boolean).join('. ');
+  const prompt = styleHint
+    ? `Say in this style: ${styleHint}\n\n"${cleaned.replace(/"/g, '\\"')}"`
+    : cleaned;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: {
+        responseModalities: ['AUDIO'],
+        speechConfig: {
+          voiceConfig: { prebuiltVoiceConfig: { voiceName } },
+        },
+      },
+    }),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err?.error?.message || `TTS API error: ${response.status}`);
+  }
+  const data = await response.json();
+  const b64 = data.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+  if (!b64) throw new Error('No audio in TTS response');
+  return pcmToWavBlob(b64);
+}
+
+// --- Call SubNP Free Image API (replaces Gemini - no API key needed) ---
+async function callImageGenerationAPI(prompt, novel) {
+  const tone = novel?.narratorTone || '';
+  const background = novel?.background || '';
+  const styleHint = [tone, background].filter(Boolean).join('. ');
+  const fullPrompt = styleHint
+    ? `Scene image, style: ${styleHint}. ${prompt}. Digital art, high quality, atmospheric.`
+    : `Scene image: ${prompt}. Digital art, high quality, atmospheric.`;
+  const url = 'https://t2i.mcpcore.xyz/api/free/generate';
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt: fullPrompt, model: 'turbo' }),
+  });
+  if (!response.ok) {
+    throw new Error(`Image API error: ${response.status}`);
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let imageUrl = null;
+  let errMsg = null;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const chunk = decoder.decode(value);
+    const lines = chunk.split('\n').filter(l => l.startsWith('data: '));
+    for (const line of lines) {
+      try {
+        const data = JSON.parse(line.slice(6));
+        if (data.status === 'complete' && data.imageUrl) imageUrl = data.imageUrl;
+        if (data.status === 'error') errMsg = data.message || 'Image generation failed';
+      } catch (_) {}
+    }
+  }
+  if (errMsg) throw new Error(errMsg);
+  if (!imageUrl) throw new Error('No image URL in response');
+  const imgResp = await fetch(imageUrl);
+  if (!imgResp.ok) throw new Error('Failed to fetch generated image');
+  const blob = await imgResp.blob();
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = () => reject(new Error('Failed to read image'));
+    r.readAsDataURL(blob);
+  });
+}
+
+// --- Generate Audio for a single segment ---
+async function generateAudioForSegment(audioIndex, segmentIndex) {
+  const segments = state.audioScriptSegments[audioIndex];
+  const raw = document.querySelector(`.script-segment-text[data-audio-index="${audioIndex}"][data-segment-index="${segmentIndex}"]`)?.textContent?.trim() || segments?.[segmentIndex];
+  const text = stripTextForTTS(raw);
+  if (!text) {
+    showToast('Segment has no speakable content (cue-only).', 'error');
+    return;
+  }
+  const novel = state.novels[audioIndex];
+  const btn = document.getElementById(`genAudioBtn_${audioIndex}_${segmentIndex}`);
+  if (btn) { btn.disabled = true; btn.textContent = '⏳'; }
+  try {
+    const blob = await callGeminiTTS(text, novel, raw);
+    const url = URL.createObjectURL(blob);
+    if (!state.generatedAudio[audioIndex]) state.generatedAudio[audioIndex] = {};
+    state.generatedAudio[audioIndex][segmentIndex] = url;
+    const container = document.getElementById(`audioScriptSegments_${audioIndex}`);
+    renderAudioScriptSegments(audioIndex, container, state.audioScriptSegments[audioIndex]);
+    showToast(`Audio generated for segment ${segmentIndex + 1}`, 'success');
+  } catch (e) {
+    showToast(`Audio failed: ${e.message}`, 'error');
+  }
+  if (btn) { btn.disabled = false; btn.textContent = '🎵'; }
+}
+
+// --- Generate All Audio (batched + parallel across multiple API keys) ---
+async function generateAllAudio(audioIndex) {
+  const novel = state.novels[audioIndex];
+  const segments = state.audioScriptSegments[audioIndex];
+  if (!novel || !segments?.length) {
+    showToast('No script segments to generate audio from.', 'error');
+    return;
+  }
+  const keys = getTtsApiKeys();
+  if (!keys.length) { showToast('TTS requires Gemini key(s). Add in API keys or Gemini TTS field.', 'error'); return; }
+  const btn = document.getElementById(`generateAllAudioBtn_${audioIndex}`);
+  btn.classList.add('loading');
+  btn.disabled = true;
+  const container = document.getElementById(`audioScriptSegments_${audioIndex}`);
+  const batches = buildAudioBatches(segments, novel);
+  if (!state.generatedAudioBatches[audioIndex]) state.generatedAudioBatches[audioIndex] = {};
+
+  // Distribute batches across keys (parallel workers)
+  const batchPerKey = Math.ceil(batches.length / keys.length) || 1;
+  const worker = async (keyIndex) => {
+    const key = keys[keyIndex];
+    const start = keyIndex * batchPerKey;
+    const end = Math.min(start + batchPerKey, batches.length);
+    let done = 0;
+    for (let b = start; b < end; b++) {
+      const batch = batches[b];
+      if (b > start) await new Promise(r => setTimeout(r, TTS_THROTTLE_MS));
+      try {
+        const blob = await callGeminiTTSMultiSpeaker(batch.prompt, batch.voiceMap, key);
+        const url = URL.createObjectURL(blob);
+        const keyName = `batch_${batch.indices[0]}_${batch.indices[batch.indices.length - 1]}`;
+        if (!state.generatedAudio[audioIndex]) state.generatedAudio[audioIndex] = {};
+        state.generatedAudio[audioIndex][keyName] = url;
+        state.generatedAudioBatches[audioIndex][keyName] = batch.indices;
+        done += batch.indices.length;
+        renderAudioScriptSegments(audioIndex, container, state.audioScriptSegments[audioIndex]);
+        showToast(`Key ${keyIndex + 1}: batch ${b + 1}/${batches.length}`, 'info');
+      } catch (e) {
+        showToast(`Batch ${b + 1} failed: ${e.message}`, 'error');
+      }
+    }
+    return done;
+  };
+
+  const workerCount = Math.min(keys.length, batches.length);
+  const results = await Promise.all(
+    Array.from({ length: workerCount }, (_, i) => worker(i))
+  );
+  const totalDone = results.reduce((a, b) => a + b, 0);
+  btn.classList.remove('loading');
+  btn.disabled = false;
+  showToast(`Generated ${totalDone} segments using ${workerCount} key(s) in parallel.`, 'success');
+}
+
+// --- Generate Scene for a single segment ---
+async function generateSceneForSegment(audioIndex, segmentIndex) {
+  const segments = state.audioScriptSegments[audioIndex];
+  const text = document.querySelector(`.script-segment-text[data-audio-index="${audioIndex}"][data-segment-index="${segmentIndex}"]`)?.textContent?.trim() || segments?.[segmentIndex];
+  if (!text) return;
+  const novel = state.novels[audioIndex];
+  const btn = document.getElementById(`genSceneBtn_${audioIndex}_${segmentIndex}`);
+  if (btn) { btn.disabled = true; btn.textContent = '⏳'; }
+  try {
+    const sceneDesc = text.replace(/^\[(SCENE|INT\.|EXT\.|SFX|AMB|MUSIC)[^\]]*\]\s*/i, '').trim() || text;
+    const dataUrl = await callImageGenerationAPI(sceneDesc, novel);
+    if (!state.generatedScenes[audioIndex]) state.generatedScenes[audioIndex] = {};
+    state.generatedScenes[audioIndex][segmentIndex] = dataUrl;
+    const container = document.getElementById(`audioScriptSegments_${audioIndex}`);
+    renderAudioScriptSegments(audioIndex, container, state.audioScriptSegments[audioIndex]);
+    showToast(`Scene generated for segment ${segmentIndex + 1}`, 'success');
+  } catch (e) {
+    showToast(`Scene failed: ${e.message}`, 'error');
+  }
+  if (btn) { btn.disabled = false; btn.textContent = '🖼️'; }
+}
+
+// --- Generate All Scenes (for scene-type segments only) ---
+async function generateAllScenes(audioIndex) {
+  const novel = state.novels[audioIndex];
+  const segments = state.audioScriptSegments[audioIndex];
+  if (!novel || !segments?.length) return;
+  const sceneIndices = segments
+    .map((t, i) => (/^\[(SCENE|INT\.|EXT\.)[^\]]*\]/i.test(t) ? i : -1))
+    .filter(i => i >= 0);
+  if (!sceneIndices.length) {
+    showToast('No scene cues ([SCENE:...] or [INT./EXT.]) found in script.', 'error');
+    return;
+  }
+  const apiKey = getApiKey();
+  if (!apiKey) { showToast('Please enter your Gemini API key.', 'error'); return; }
+  const btn = document.getElementById(`generateAllScenesBtn_${audioIndex}`);
+  btn.classList.add('loading');
+  btn.disabled = true;
+  const container = document.getElementById(`audioScriptSegments_${audioIndex}`);
+  let done = 0;
+  for (const i of sceneIndices) {
+    const text = document.querySelector(`.script-segment-text[data-audio-index="${audioIndex}"][data-segment-index="${i}"]`)?.textContent?.trim() || segments[i];
+    const sceneDesc = text.replace(/^\[(SCENE|INT\.|EXT\.)[^\]]*\]\s*/i, '').trim() || text;
+    try {
+      const dataUrl = await callImageGenerationAPI(sceneDesc, novel);
+      if (!state.generatedScenes[audioIndex]) state.generatedScenes[audioIndex] = {};
+      state.generatedScenes[audioIndex][i] = dataUrl;
+      renderAudioScriptSegments(audioIndex, container, state.audioScriptSegments[audioIndex]);
+      done++;
+      showToast(`Scene ${done}/${sceneIndices.length}`, 'info');
+    } catch (e) {
+      showToast(`Scene ${i + 1} failed: ${e.message}`, 'error');
+    }
+  }
+  btn.classList.remove('loading');
+  btn.disabled = false;
+  showToast(`Generated ${done}/${sceneIndices.length} scene images.`, 'success');
+}
+
+// --- Download Audio Drama Script ---
+function downloadAudioScript(index) {
+  const novel = state.novels[index];
+  // Sync any unsaved edits from DOM before download
+  const textEls = document.querySelectorAll(`.script-segment-text[data-audio-index="${index}"]`);
+  if (textEls.length) {
+    const segs = [...(state.audioScriptSegments[index] || [])];
+    textEls.forEach(el => {
+      const sIdx = parseInt(el.dataset.segmentIndex, 10);
+      if (!isNaN(sIdx)) segs[sIdx] = el.textContent || '';
+    });
+    state.audioScriptSegments[index] = segs;
+  }
+  const segments = state.audioScriptSegments[index];
+  const scriptText = segments ? segments.join('\n') : state.audioScripts[index];
+  if (!novel || !scriptText) {
+    showToast('No script to download. Generate it first.', 'error');
+    return;
+  }
+
+  let content = '';
+  content += `${'='.repeat(60)}\n`;
+  content += `  AUDIO DRAMA SCRIPT: ${novel.title || 'Untitled'}\n`;
+  content += `  by ${novel.authorName || 'Unknown Author'}\n`;
+  content += `${'='.repeat(60)}\n\n`;
+  content += scriptText;
+  content += `\n\n${'='.repeat(60)}\n`;
+  content += `  Generated by AI Novel Template Generator\n`;
+  content += `  Date: ${new Date().toLocaleDateString()}\n`;
+  content += `${'='.repeat(60)}\n`;
+
+  const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `audio_script_${index + 1}_${sanitizeFilename(novel.title)}.txt`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  showToast(`Downloaded script: ${novel.title}`, 'success');
+}
