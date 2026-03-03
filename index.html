@@ -7,7 +7,7 @@
   <meta name="description"
     content="AI Novel Template Generator — Create multiple novel outlines from a single creative prompt using Google Gemini AI.">
   <title>AI Novel Template Generator</title>
-  <link rel="stylesheet" href="style.css?v=15">
+  <link rel="stylesheet" href="style.css?v=17">
   <link rel="icon"
     href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📚</text></svg>">
 </head>
@@ -23,106 +23,124 @@
       <p class="subtitle">Transform a single creative prompt into multiple unique novel templates powered by Google
         Gemini AI</p>
       <a href="https://github.com/lamtrang2405/novel-text/blob/main/TUTORIAL.md" target="_blank" rel="noopener" class="tutorial-link">📖 How to use</a>
+      <button type="button" class="btn-icon-header" id="openSettingsBtn" title="Settings">⚙️</button>
     </header>
 
-    <!-- ======== API KEY ======== -->
-    <section class="glass-card" style="animation-delay: 0.1s">
+    <!-- ======== SETTINGS MODAL ======== -->
+    <div class="settings-modal" id="settingsModal">
+      <div class="settings-modal-content">
+        <div class="settings-header">
+          <h2>⚙️ Settings</h2>
+          <button type="button" class="btn-close" id="closeSettingsBtn">✕</button>
+        </div>
+        <div class="settings-body">
+          <div class="settings-section">
+            <h3>Text Generation (templates, story, script)</h3>
+            <div class="form-group">
+              <label for="aiProvider">AI Provider</label>
+              <select id="aiProvider">
+                <option value="gemini">Google Gemini</option>
+                <option value="deepseek">DeepSeek</option>
+              </select>
+            </div>
+            <div class="form-group full-width">
+              <label for="apiKey">API Key(s) <span class="required">*</span></label>
+              <div style="display:flex; gap:8px; align-items:flex-start;">
+                <textarea id="apiKey" rows="2" placeholder="Gemini: aistudio.google.com. DeepSeek: platform.deepseek.com" autocomplete="off" style="flex:1"></textarea>
+                <button type="button" class="btn btn-secondary btn-sm" id="testApiBtn">Test</button>
+              </div>
+            </div>
+            <div class="form-group full-width" id="geminiTtsKeyGroup" style="display:none">
+              <label for="geminiTtsKey">Gemini Key (for TTS when using DeepSeek)</label>
+              <input type="password" id="geminiTtsKey" placeholder="Paste Gemini key for voice..." autocomplete="off">
+            </div>
+          </div>
+          <div class="settings-section">
+            <h3>Audio Generation (TTS)</h3>
+            <div class="form-group">
+              <label for="ttsProvider">TTS Provider</label>
+              <select id="ttsProvider">
+                <option value="gemini">Google Gemini</option>
+                <option value="ai33pro">AI33 Pro</option>
+              </select>
+            </div>
+            <div class="form-group full-width" id="geminiTtsKeyGroupMain">
+              <label for="ttsApiKey">TTS API Key(s)</label>
+              <textarea id="ttsApiKey" rows="2" placeholder="Gemini TTS key. Multiple keys = parallel generation." autocomplete="off"></textarea>
+            </div>
+            <div class="form-group full-width" id="ai33SettingsGroup" style="display:none">
+              <label for="ai33ApiKey">AI33 Pro API Key</label>
+              <input type="password" id="ai33ApiKey" placeholder="From ai33.pro" autocomplete="off">
+            </div>
+            <div class="form-group" id="ai33BaseUrlGroup" style="display:none">
+              <label for="ai33BaseUrl">AI33 Base URL</label>
+              <input type="text" id="ai33BaseUrl" placeholder="https://api.ai33.pro/v1" autocomplete="off">
+            </div>
+            <div class="form-group">
+              <label for="narratorVoice">Narrator Voice</label>
+              <select id="narratorVoice">
+                <optgroup label="Gemini voices" data-tts="gemini">
+                  <option value="Charon">Charon</option>
+                  <option value="Schedar">Schedar</option>
+                  <option value="Sulafat">Sulafat</option>
+                  <option value="Kore">Kore</option>
+                  <option value="Puck">Puck</option>
+                  <option value="Orus">Orus</option>
+                </optgroup>
+                <optgroup label="AI33 / OpenAI voices" data-tts="ai33">
+                  <option value="alloy">alloy</option>
+                  <option value="echo">echo</option>
+                  <option value="fable">fable</option>
+                  <option value="onyx">onyx</option>
+                  <option value="nova">nova</option>
+                  <option value="shimmer">shimmer</option>
+                </optgroup>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="femaleVoice">Female Character Voice</label>
+              <select id="femaleVoice">
+                <optgroup label="Gemini" data-tts="gemini">
+                  <option value="Sulafat">Sulafat</option>
+                  <option value="Kore">Kore</option>
+                  <option value="Zephyr">Zephyr</option>
+                </optgroup>
+                <optgroup label="AI33" data-tts="ai33">
+                  <option value="nova">nova</option>
+                  <option value="shimmer">shimmer</option>
+                </optgroup>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="maleVoice">Male Character Voice</label>
+              <select id="maleVoice">
+                <optgroup label="Gemini" data-tts="gemini">
+                  <option value="Charon">Charon</option>
+                  <option value="Puck">Puck</option>
+                  <option value="Orus">Orus</option>
+                </optgroup>
+                <optgroup label="AI33" data-tts="ai33">
+                  <option value="onyx">onyx</option>
+                  <option value="alloy">alloy</option>
+                </optgroup>
+              </select>
+            </div>
+          </div>
+        </div>
+        <div class="settings-footer">
+          <button type="button" class="btn btn-primary" id="saveSettingsBtn">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ======== API STATUS (compact) ======== -->
+    <section class="glass-card api-status-card" style="animation-delay: 0.1s">
       <div class="card-title">
         <div class="icon purple">🔑</div>
-        API Configuration
+        API Status
+        <span class="api-status-badge" id="apiStatusBadge">Configure in Settings</span>
       </div>
-      <div class="form-grid">
-        <div class="form-group">
-          <label for="aiProvider">AI Provider (for templates, story, script)</label>
-          <select id="aiProvider">
-            <option value="gemini">Google Gemini</option>
-            <option value="deepseek">DeepSeek</option>
-          </select>
-        </div>
-        <div class="form-group full-width">
-          <label for="apiKey">API Key(s) <span class="required">*</span></label>
-          <div style="display:flex; gap:8px; align-items:flex-start;">
-            <textarea id="apiKey" rows="3" placeholder="Gemini: Google AI Studio. DeepSeek: platform.deepseek.com. One per line or comma-separated." autocomplete="off" style="flex:1"></textarea>
-            <button type="button" class="btn btn-secondary btn-sm" id="testApiBtn" title="Verify your API key works">Test</button>
-          </div>
-          <small class="form-hint" id="apiKeyHint">Gemini: templates + TTS. DeepSeek: templates only. Multiple keys = parallel audio.</small>
-        </div>
-        <div class="form-group full-width" id="geminiTtsKeyGroup" style="display:none">
-          <label for="geminiTtsKey">Gemini API Key (for TTS)</label>
-          <input type="password" id="geminiTtsKey" placeholder="Required for voice generation when using DeepSeek..." autocomplete="off">
-        </div>
-        <div class="form-group">
-          <label for="narratorVoice">Narrator Voice</label>
-          <select id="narratorVoice">
-            <optgroup label="★ Natural / Conversational">
-              <option value="Charon">Charon — Natural, informative (recommended)</option>
-              <option value="Schedar">Schedar — Even, calm</option>
-              <option value="Sulafat">Sulafat — Warm, friendly</option>
-              <option value="Achird">Achird — Friendly, casual</option>
-            </optgroup>
-            <optgroup label="Female">
-              <option value="Kore">Kore — Firm</option>
-              <option value="Zephyr">Zephyr — Bright</option>
-              <option value="Leda">Leda — Youthful</option>
-              <option value="Aoede">Aoede — Breezy</option>
-              <option value="Callirrhoe">Callirrhoe — Easy-going</option>
-              <option value="Despina">Despina — Smooth</option>
-              <option value="Gacrux">Gacrux — Mature</option>
-              <option value="Vindemiatrix">Vindemiatrix — Gentle</option>
-            </optgroup>
-            <optgroup label="Male">
-              <option value="Puck">Puck — Upbeat</option>
-              <option value="Fenrir">Fenrir — Excitable</option>
-              <option value="Orus">Orus — Firm</option>
-              <option value="Enceladus">Enceladus — Breathy</option>
-              <option value="Umbriel">Umbriel — Easy-going</option>
-              <option value="Algieba">Algieba — Smooth</option>
-            </optgroup>
-          </select>
-        </div>
-        <div class="form-group">
-          <label for="femaleVoice">Female Character Voice</label>
-          <select id="femaleVoice">
-            <option value="Sulafat">Sulafat — Warm (natural)</option>
-            <option value="Kore">Kore</option>
-            <option value="Zephyr">Zephyr</option>
-            <option value="Leda">Leda</option>
-            <option value="Aoede">Aoede</option>
-            <option value="Callirrhoe">Callirrhoe</option>
-            <option value="Autonoe">Autonoe</option>
-            <option value="Despina">Despina</option>
-            <option value="Erinome">Erinome</option>
-            <option value="Laomedeia">Laomedeia</option>
-            <option value="Achernar">Achernar</option>
-            <option value="Gacrux">Gacrux</option>
-            <option value="Vindemiatrix">Vindemiatrix</option>
-            <option value="Sadachbia">Sadachbia</option>
-            <option value="Sulafat">Sulafat</option>
-          </select>
-        </div>
-        <div class="form-group">
-          <label for="maleVoice">Male Character Voice</label>
-          <select id="maleVoice">
-            <option value="Charon">Charon — Natural (recommended)</option>
-            <option value="Puck">Puck</option>
-            <option value="Charon">Charon</option>
-            <option value="Fenrir">Fenrir</option>
-            <option value="Orus">Orus</option>
-            <option value="Enceladus">Enceladus</option>
-            <option value="Iapetus">Iapetus</option>
-            <option value="Umbriel">Umbriel</option>
-            <option value="Algieba">Algieba</option>
-            <option value="Algenib">Algenib</option>
-            <option value="Rasalgethi">Rasalgethi</option>
-            <option value="Alnilam">Alnilam</option>
-            <option value="Schedar">Schedar</option>
-            <option value="Pulcherrima">Pulcherrima</option>
-            <option value="Achird">Achird</option>
-            <option value="Zubenelgenubi">Zubenelgenubi</option>
-            <option value="Sadaltager">Sadaltager</option>
-          </select>
-        </div>
-      </div>
+      <div class="form-hint" style="margin-top:8px">API keys and TTS provider are configured in <button type="button" class="btn-link" id="openSettingsFromStatus">Settings</button>.</div>
     </section>
 
     <!-- ======== CREATIVE BRIEF ======== -->
@@ -243,8 +261,12 @@
     <section class="results-section" id="resultsSection">
       <div class="results-header">
         <h2>📚 Generated Novels</h2>
-        <div style="display:flex; gap:12px; align-items:center;">
+        <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
           <span class="results-count" id="resultsCount"></span>
+          <button class="btn btn-primary btn-sm" id="generateAllStoriesBtn">
+            <span class="spinner"></span>
+            <span class="btn-text">📖 Generate All Stories</span>
+          </button>
           <button class="btn btn-secondary btn-sm" id="downloadAllBtn">📥 Download All</button>
         </div>
       </div>
@@ -256,7 +278,7 @@
   <!-- Toast Container -->
   <div class="toast-container" id="toastContainer"></div>
 
-  <script src="app.js?v=15"></script>
+  <script src="app.js?v=17"></script>
 </body>
 
 </html>

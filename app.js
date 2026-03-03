@@ -29,57 +29,73 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 function initApp() {
-  // Restore API key(s) and narrator voice from localStorage
+  // Restore from localStorage
   const savedKeys = localStorage.getItem('gemini_api_keys') || localStorage.getItem('gemini_api_key');
   const apiKeyEl = document.getElementById('apiKey');
   if (savedKeys && apiKeyEl) {
     apiKeyEl.value = savedKeys;
     state.apiKey = getApiKeys()[0] || '';
   }
-  const savedVoice = localStorage.getItem('narrator_voice');
-  if (savedVoice) {
-    const sel = document.getElementById('narratorVoice');
-    if (sel) sel.value = savedVoice;
-  }
+  const savedProvider = localStorage.getItem('ai_provider');
+  const aiProviderSel = document.getElementById('aiProvider');
+  if (savedProvider && aiProviderSel) aiProviderSel.value = savedProvider;
+  const ttsGroup = document.getElementById('geminiTtsKeyGroup');
+  if (ttsGroup) ttsGroup.style.display = (aiProviderSel?.value === 'deepseek') ? 'block' : 'none';
+
+  const savedTtsProvider = localStorage.getItem('tts_provider') || 'gemini';
+  const ttsProviderSel = document.getElementById('ttsProvider');
+  if (ttsProviderSel) ttsProviderSel.value = savedTtsProvider;
+  updateTtsProviderUI();
+
+  const savedTtsKey = localStorage.getItem('tts_api_keys') || localStorage.getItem('gemini_tts_key');
+  const ttsKeyEl = document.getElementById('ttsApiKey');
+  if (savedTtsKey && ttsKeyEl) ttsKeyEl.value = savedTtsKey;
+  const savedAi33 = localStorage.getItem('ai33_api_key');
+  const ai33El = document.getElementById('ai33ApiKey');
+  if (savedAi33 && ai33El) ai33El.value = savedAi33;
+  const savedAi33Url = localStorage.getItem('ai33_base_url');
+  const ai33UrlEl = document.getElementById('ai33BaseUrl');
+  if (savedAi33Url && ai33UrlEl) ai33UrlEl.value = savedAi33Url;
+
   ['narratorVoice', 'femaleVoice', 'maleVoice'].forEach(id => {
-    document.getElementById(id)?.addEventListener('change', (e) => {
-      localStorage.setItem(id, e.target.value);
-    });
+    const el = document.getElementById(id);
+    const saved = localStorage.getItem(id);
+    if (saved && el) el.value = saved;
+    el?.addEventListener('change', (e) => localStorage.setItem(id, e.target.value));
   });
-  const savedFemale = localStorage.getItem('femaleVoice');
-  const savedMale = localStorage.getItem('maleVoice');
-  if (savedFemale) document.getElementById('femaleVoice').value = savedFemale;
-  if (savedMale) document.getElementById('maleVoice').value = savedMale;
+
+  // Settings modal
+  document.getElementById('openSettingsBtn')?.addEventListener('click', () => openSettings());
+  document.getElementById('openSettingsFromStatus')?.addEventListener('click', () => openSettings());
+  document.getElementById('closeSettingsBtn')?.addEventListener('click', () => closeSettings());
+  document.getElementById('saveSettingsBtn')?.addEventListener('click', () => { saveSettings(); closeSettings(); });
+  document.getElementById('settingsModal')?.addEventListener('click', (e) => {
+    if (e.target.id === 'settingsModal') closeSettings();
+  });
+
+  document.getElementById('aiProvider')?.addEventListener('change', (e) => {
+    localStorage.setItem('ai_provider', e.target.value);
+    if (ttsGroup) ttsGroup.style.display = e.target.value === 'deepseek' ? 'block' : 'none';
+  });
+  document.getElementById('ttsProvider')?.addEventListener('change', () => updateTtsProviderUI());
+  document.getElementById('apiKey')?.addEventListener('input', (e) => {
+    const keys = getApiKeys();
+    state.apiKey = keys[0] || '';
+    localStorage.setItem('gemini_api_keys', e.target.value);
+  });
+  document.getElementById('ttsApiKey')?.addEventListener('input', (e) => localStorage.setItem('tts_api_keys', e.target.value));
+  document.getElementById('geminiTtsKey')?.addEventListener('input', (e) => localStorage.setItem('gemini_tts_key', e.target.value));
+  document.getElementById('ai33ApiKey')?.addEventListener('input', (e) => localStorage.setItem('ai33_api_key', e.target.value));
+  document.getElementById('ai33BaseUrl')?.addEventListener('input', (e) => localStorage.setItem('ai33_base_url', e.target.value));
+
+  updateApiStatusBadge();
 
   // Event listeners
   const genBtn = document.getElementById('generateBtn');
   if (genBtn) genBtn.addEventListener('click', handleGenerate);
   document.getElementById('testApiBtn')?.addEventListener('click', handleTestApi);
+  document.getElementById('generateAllStoriesBtn')?.addEventListener('click', handleGenerateAllStories);
   document.getElementById('downloadAllBtn').addEventListener('click', handleDownloadAll);
-  document.getElementById('apiKey').addEventListener('input', (e) => {
-    const keys = getApiKeys();
-    state.apiKey = keys[0] || '';
-    localStorage.setItem('gemini_api_keys', e.target.value);
-  });
-  document.getElementById('aiProvider')?.addEventListener('change', (e) => {
-    localStorage.setItem('ai_provider', e.target.value);
-    const ttsGroup = document.getElementById('geminiTtsKeyGroup');
-    if (ttsGroup) ttsGroup.style.display = e.target.value === 'deepseek' ? 'block' : 'none';
-  });
-  const savedProvider = localStorage.getItem('ai_provider');
-  const ttsGroupEl = document.getElementById('geminiTtsKeyGroup');
-  if (savedProvider) {
-    const sel = document.getElementById('aiProvider');
-    if (sel) {
-      sel.value = savedProvider;
-      if (ttsGroupEl) ttsGroupEl.style.display = savedProvider === 'deepseek' ? 'block' : 'none';
-    }
-  }
-  const savedGeminiTts = localStorage.getItem('gemini_tts_key');
-  if (savedGeminiTts) document.getElementById('geminiTtsKey').value = savedGeminiTts;
-  document.getElementById('geminiTtsKey')?.addEventListener('input', (e) => {
-    localStorage.setItem('gemini_tts_key', e.target.value);
-  });
 
   // File upload
   const fileUploadArea = document.getElementById('fileUploadArea');
@@ -123,6 +139,58 @@ function handleFileUpload(file) {
   reader.readAsText(file);
 }
 
+// --- Settings modal ---
+function openSettings() {
+  document.getElementById('settingsModal')?.classList.add('active');
+}
+function closeSettings() {
+  document.getElementById('settingsModal')?.classList.remove('active');
+}
+function saveSettings() {
+  const ttsProvider = document.getElementById('ttsProvider')?.value || 'gemini';
+  localStorage.setItem('tts_provider', ttsProvider);
+  const ttsKeys = document.getElementById('ttsApiKey')?.value || '';
+  localStorage.setItem('tts_api_keys', ttsKeys);
+  if (ttsKeys) localStorage.setItem('gemini_tts_key', ttsKeys.split(/[\s,;\n]+/)[0]?.trim() || '');
+  const ai33Key = document.getElementById('ai33ApiKey')?.value || '';
+  localStorage.setItem('ai33_api_key', ai33Key);
+  const ai33Url = document.getElementById('ai33BaseUrl')?.value || '';
+  localStorage.setItem('ai33_base_url', ai33Url || 'https://api.ai33.pro/v1');
+  updateApiStatusBadge();
+  showToast('Settings saved', 'success');
+}
+function updateTtsProviderUI() {
+  const tts = document.getElementById('ttsProvider')?.value || 'gemini';
+  const geminiGroup = document.getElementById('geminiTtsKeyGroupMain');
+  const ai33Group = document.getElementById('ai33SettingsGroup');
+  const ai33UrlGroup = document.getElementById('ai33BaseUrlGroup');
+  if (geminiGroup) geminiGroup.style.display = tts === 'gemini' ? 'block' : 'none';
+  if (ai33Group) ai33Group.style.display = tts === 'ai33pro' ? 'block' : 'none';
+  if (ai33UrlGroup) ai33UrlGroup.style.display = tts === 'ai33pro' ? 'block' : 'none';
+  ['narratorVoice', 'femaleVoice', 'maleVoice'].forEach(id => {
+    const sel = document.getElementById(id);
+    if (!sel) return;
+    const target = tts === 'ai33pro' ? 'ai33' : 'gemini';
+    Array.from(sel.querySelectorAll('optgroup')).forEach(grp => {
+      grp.style.display = grp.dataset.tts === target ? '' : 'none';
+    });
+    const visibleOpts = sel.querySelectorAll(`optgroup[data-tts="${target}"] option`);
+    const validValues = Array.from(visibleOpts).map(o => o.value);
+    if (validValues.length && !validValues.includes(sel.value)) {
+      sel.value = validValues[0];
+    }
+  });
+  updateApiStatusBadge();
+}
+function updateApiStatusBadge() {
+  const badge = document.getElementById('apiStatusBadge');
+  if (!badge) return;
+  const hasText = getApiKeys().length > 0;
+  const hasTts = getTtsProvider() === 'ai33pro' ? (document.getElementById('ai33ApiKey')?.value?.trim() || '').length > 0 : getTtsApiKeys().length > 0;
+  badge.textContent = hasText ? (hasTts ? 'Configured' : 'TTS: configure in Settings') : 'Configure in Settings';
+  badge.style.background = hasText ? 'rgba(16, 185, 129, 0.2)' : 'rgba(90, 97, 128, 0.2)';
+}
+
 // --- Get API keys (supports multiple: comma or newline separated) ---
 function getApiKeys() {
   const el = document.getElementById('apiKey');
@@ -142,20 +210,32 @@ function getAIProvider() {
   return document.getElementById('aiProvider')?.value || 'gemini';
 }
 
-// --- Get API key(s) for TTS (always Gemini; separate field when provider is DeepSeek) ---
+// --- Get TTS provider ---
+function getTtsProvider() {
+  return document.getElementById('ttsProvider')?.value || 'gemini';
+}
+
+// --- Get API key(s) for TTS ---
 function getTtsApiKey() {
-  if (getAIProvider() === 'deepseek') {
-    return document.getElementById('geminiTtsKey')?.value?.trim() || getApiKey();
+  if (getTtsProvider() === 'ai33pro') {
+    return document.getElementById('ai33ApiKey')?.value?.trim() || '';
   }
+  const ttsKey = document.getElementById('ttsApiKey')?.value?.trim();
+  if (ttsKey) return ttsKey.split(/[\s,;\n]+/)[0]?.trim() || '';
+  const geminiTts = document.getElementById('geminiTtsKey')?.value?.trim();
+  if (geminiTts) return geminiTts;
   return getApiKey();
 }
 
 function getTtsApiKeys() {
-  if (getAIProvider() === 'deepseek') {
+  if (getTtsProvider() === 'ai33pro') {
     const k = getTtsApiKey();
     return k ? [k] : [];
   }
-  return getApiKeys();
+  const raw = document.getElementById('ttsApiKey')?.value || document.getElementById('geminiTtsKey')?.value || '';
+  if (!raw) return getAIProvider() === 'gemini' ? getApiKeys() : [];
+  const keys = raw.split(/[\s,;\n]+/).map(k => k.trim()).filter(Boolean);
+  return keys.length ? keys : (getAIProvider() === 'gemini' ? getApiKeys() : []);
 }
 
 // --- Fetch with timeout ---
@@ -304,6 +384,7 @@ Generate exactly ${formData.numNovels} novel templates. Each novel template MUST
 10. **chapters** — An array of 5-10 chapter outlines, each with: chapterNumber, title, summary (2-3 sentences)
 11. **themes** — Array of core themes explored in the novel
 12. **genre** — Primary and secondary genres
+13. **category** — Reader/info category (e.g. "Young Adult", "Adult Fiction", "Children's", "Non-fiction", "Romance", "Fantasy")
 
 Each novel should be DISTINCT — different plot, different character dynamics, different themes — while still being inspired by the creative brief.
 
@@ -327,7 +408,8 @@ You MUST return valid JSON only. No markdown code blocks, no backticks, no expla
         { "chapterNumber": 1, "title": "...", "summary": "..." }
       ],
       "themes": ["...", "..."],
-      "genre": "..."
+      "genre": "...",
+      "category": "..."
     }
   ]
 }`;
@@ -350,6 +432,7 @@ async function handleTestApi() {
     if (provider === 'deepseek') {
       await callDeepSeekAPI('Reply with only: OK', false);
       showToast('DeepSeek API: Connection OK', 'success');
+      updateApiStatusBadge();
     } else {
       const apiKey = getApiKey();
       const models = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'];
@@ -368,6 +451,7 @@ async function handleTestApi() {
           const data = await r.json();
           if (r.ok && data.candidates?.[0]?.content?.parts?.[0]?.text) {
             showToast(`Gemini API (${model}): OK`, 'success');
+            updateApiStatusBadge();
             return;
           }
           if (!r.ok) {
@@ -571,6 +655,11 @@ function createNovelCard(novel, index) {
       <div class="novel-field">
         <div class="novel-field-label">📖 Genre & Themes</div>
         <div class="novel-field-content editable" contenteditable="true" data-novel="${index}" data-field="genre">${escapeHtml(novel.genre || 'N/A')}${themesHtml ? ' — ' + themesHtml : ''}</div>
+      </div>
+
+      <div class="novel-field">
+        <div class="novel-field-label">📂 Category</div>
+        <div class="novel-field-content editable" contenteditable="true" data-novel="${index}" data-field="category">${escapeHtml(novel.category || 'N/A')}</div>
       </div>
 
       <div class="divider"></div>
@@ -1002,6 +1091,37 @@ function toggleSection(sectionId) {
   card.classList.toggle('open', isHidden);
 }
 
+// --- Generate All Stories (for all reviewed templates that don't have a story yet) ---
+async function handleGenerateAllStories() {
+  const eligible = [...state.reviewedNovels].filter(i => !state.stories[i]);
+  if (!eligible.length) {
+    showToast(state.reviewedNovels.size === 0
+      ? 'Mark templates as Passed Manual Review first'
+      : 'All reviewed templates already have stories',
+    'info');
+    return;
+  }
+  const btn = document.getElementById('generateAllStoriesBtn');
+  if (!btn || btn.disabled) return;
+  btn.classList.add('loading');
+  btn.disabled = true;
+  let done = 0;
+  const total = eligible.length;
+  for (const index of eligible) {
+    try {
+      await generateFullStory(index);
+      done++;
+      if (done < total) showToast(`Story ${done}/${total} done. Continuing...`, 'info');
+    } catch (e) {
+      showToast(`Stopped after ${done} stories. ${e.message}`, 'error');
+      break;
+    }
+  }
+  btn.classList.remove('loading');
+  btn.disabled = false;
+  if (done === total) showToast(`All ${total} stories generated!`, 'success');
+}
+
 // --- Generate Full Story ---
 async function generateFullStory(index) {
   const novel = state.novels[index];
@@ -1046,6 +1166,7 @@ async function generateFullStory(index) {
 ## NOVEL DETAILS
 **Title:** ${novel.title}
 **Genre:** ${novel.genre || 'Fiction'}
+**Category:** ${novel.category || 'Fiction'}
 **Writing Language:** ${novel.writingLanguage || 'English'}
 **Narrator Tone:** ${novel.narratorTone || 'Third-person omniscient'}
 **Background/Setting:** ${novel.background || 'Not specified'}
@@ -1272,8 +1393,8 @@ function renderAudioScriptSegments(audioIndex, container, segments) {
         </div>
         <div class="script-segment-text editable" contenteditable="true" data-audio-index="${audioIndex}" data-segment-index="${i}">${escapeHtml(text)}</div>
       </div>
-      ${hasAudio ? `<div class="segment-generated-audio"><audio controls src="${audioBlobs[i]}" id="audioPlayer_${audioIndex}_${i}"></audio><a href="${audioBlobs[i]}" download="segment_${i + 1}.wav" class="btn btn-icon">📥</a></div>` : ''}
-      ${hasBatchAudio ? `<div class="segment-generated-audio batch-audio"><span class="batch-label">Segments ${batchInfo.indices[0] + 1}–${batchInfo.indices[batchInfo.indices.length - 1] + 1}</span><audio controls src="${batchInfo.url}" id="audioBatch_${audioIndex}_${i}"></audio><a href="${batchInfo.url}" download="batch_${batchInfo.indices[0] + 1}-${batchInfo.indices[batchInfo.indices.length - 1] + 1}.wav" class="btn btn-icon">📥</a></div>` : ''}
+      ${hasAudio ? `<div class="segment-generated-audio"><audio controls src="${audioBlobs[i]}" id="audioPlayer_${audioIndex}_${i}"></audio><a href="${audioBlobs[i]}" download="segment_${i + 1}.${getTtsProvider() === 'ai33pro' ? 'mp3' : 'wav'}" class="btn btn-icon">📥</a></div>` : ''}
+      ${hasBatchAudio ? `<div class="segment-generated-audio batch-audio"><span class="batch-label">Segments ${batchInfo.indices[0] + 1}–${batchInfo.indices[batchInfo.indices.length - 1] + 1}</span><audio controls src="${batchInfo.url}" id="audioBatch_${audioIndex}_${i}"></audio><a href="${batchInfo.url}" download="batch_${batchInfo.indices[0] + 1}-${batchInfo.indices[batchInfo.indices.length - 1] + 1}.${getTtsProvider() === 'ai33pro' ? 'mp3' : 'wav'}" class="btn btn-icon">📥</a></div>` : ''}
       ${hasScene ? `<div class="segment-generated-scene"><img src="${sceneImages[i]}" alt="Scene ${i + 1}"/><a href="${sceneImages[i]}" download="scene_${i + 1}.png" class="btn btn-icon">📥</a></div>` : ''}
     `;
     container.appendChild(seg);
@@ -1442,8 +1563,40 @@ function buildAudioBatches(segments, novel) {
   return batches;
 }
 
+// --- Call AI33 Pro TTS (OpenAI-compatible API) ---
+async function callAi33TTS(text, voiceName, apiKeyOverride = null) {
+  const apiKey = apiKeyOverride || getTtsApiKey();
+  if (!apiKey) throw new Error('AI33 Pro API key required. Set it in Settings.');
+  const baseUrl = (document.getElementById('ai33BaseUrl')?.value || 'https://api.ai33.pro/v1').replace(/\/$/, '');
+  const url = `${baseUrl}/audio/speech`;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: 'tts-1',
+      input: text,
+      voice: voiceName || 'alloy',
+      response_format: 'mp3',
+    }),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err?.error?.message || `AI33 TTS error: ${response.status}`);
+  }
+  return await response.blob();
+}
+
 // --- Call Gemini Multi-Speaker TTS (batch = fewer API calls) ---
 async function callGeminiTTSMultiSpeaker(prompt, voiceMap, apiKeyOverride = null) {
+  if (getTtsProvider() === 'ai33pro') {
+    const speakers = Object.keys(voiceMap);
+    const voice = voiceMap[speakers[0]] || 'alloy';
+    const cleanPrompt = prompt.replace(/^[A-Z\s]+:\s*/gm, '').trim();
+    return callAi33TTS(cleanPrompt, voice, apiKeyOverride);
+  }
   const apiKey = apiKeyOverride || getTtsApiKey();
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`;
   const speakers = Object.keys(voiceMap);
@@ -1502,8 +1655,11 @@ async function callGeminiTTSMultiSpeaker(prompt, voiceMap, apiKeyOverride = null
 async function callGeminiTTS(text, novel, segmentRaw = null) {
   const cleaned = stripTextForTTS(segmentRaw || text);
   if (!cleaned) throw new Error('No text to speak (or segment is cue-only)');
-  const apiKey = getTtsApiKey();
   const voiceName = getVoiceForSegment(segmentRaw || text, novel);
+  if (getTtsProvider() === 'ai33pro') {
+    return callAi33TTS(cleaned, voiceName);
+  }
+  const apiKey = getTtsApiKey();
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`;
   const tone = novel?.narratorTone || '';
   const background = novel?.background || '';
@@ -1616,7 +1772,7 @@ async function generateAllAudio(audioIndex) {
     return;
   }
   const keys = getTtsApiKeys();
-  if (!keys.length) { showToast('TTS requires Gemini key(s). Add in API keys or Gemini TTS field.', 'error'); return; }
+  if (!keys.length) { showToast('TTS requires API key(s). Configure in Settings.', 'error'); return; }
   const btn = document.getElementById(`generateAllAudioBtn_${audioIndex}`);
   btn.classList.add('loading');
   btn.disabled = true;
