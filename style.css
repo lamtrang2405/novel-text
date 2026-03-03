@@ -136,6 +136,18 @@ body::before {
   margin: 0 auto;
 }
 
+.app-header .tutorial-link {
+  display: inline-block;
+  margin-top: 12px;
+  font-size: 0.9rem;
+  color: var(--accent-teal);
+  text-decoration: none;
+  transition: color var(--transition-fast);
+}
+.app-header .tutorial-link:hover {
+  color: var(--accent-purple-light);
+}
+
 /* --- Glass Card --- */
 .glass-card {
   background: var(--bg-card);
