@@ -41,6 +41,35 @@ function injectUiStyles() {
     .chapter-title { font-weight: 700; letter-spacing: 0.2px; }
     .chapter-meta { opacity: 0.75; font-size: 12px; }
     .chapter-body { white-space: pre-wrap; line-height: 1.65; }
+    .download-templates-wrap { position: relative; display: inline-block; }
+    .download-templates-dropdown {
+      display: none;
+      position: absolute;
+      top: 100%;
+      left: 0;
+      margin-top: 4px;
+      min-width: 180px;
+      background: var(--bg-card, rgba(15, 23, 55, 0.95));
+      border: 1px solid var(--border-color, rgba(124, 58, 237, 0.3));
+      border-radius: var(--radius-md, 12px);
+      box-shadow: var(--shadow-lg, 0 8px 40px rgba(0,0,0,0.5));
+      z-index: 100;
+      overflow: hidden;
+    }
+    .download-templates-dropdown.open { display: block; }
+    .download-option {
+      display: block;
+      width: 100%;
+      padding: 10px 14px;
+      text-align: left;
+      background: transparent;
+      border: none;
+      color: var(--text-primary, #e8ebf4);
+      font-size: 0.9rem;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    .download-option:hover { background: rgba(124, 58, 237, 0.2); }
   `;
   document.head.appendChild(style);
 }
@@ -134,9 +163,29 @@ function initApp() {
   if (genBtn) genBtn.addEventListener('click', handleGenerate);
   document.getElementById('testApiBtn')?.addEventListener('click', handleTestApi);
   document.getElementById('generateAllStoriesBtn')?.addEventListener('click', handleGenerateAllStories);
-  document.getElementById('downloadAllBtn').addEventListener('click', handleDownloadAll);
-  document.getElementById('exportCsvBtn')?.addEventListener('click', handleExportCsv);
-  document.getElementById('exportXlsxBtn')?.addEventListener('click', handleExportXlsx);
+
+  // Download templates: dropdown (All as .txt | Export CSV | Export XLSX)
+  const downloadTemplatesBtn = document.getElementById('downloadTemplatesBtn');
+  const downloadTemplatesDropdown = document.getElementById('downloadTemplatesDropdown');
+  if (downloadTemplatesBtn && downloadTemplatesDropdown) {
+    downloadTemplatesBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      downloadTemplatesDropdown.classList.toggle('open');
+    });
+    document.addEventListener('click', () => downloadTemplatesDropdown.classList.remove('open'));
+    document.getElementById('downloadAllTxtBtn')?.addEventListener('click', () => {
+      downloadTemplatesDropdown.classList.remove('open');
+      handleDownloadAll();
+    });
+    document.getElementById('downloadExportCsvBtn')?.addEventListener('click', () => {
+      downloadTemplatesDropdown.classList.remove('open');
+      handleExportCsv();
+    });
+    document.getElementById('downloadExportXlsxBtn')?.addEventListener('click', () => {
+      downloadTemplatesDropdown.classList.remove('open');
+      handleExportXlsx();
+    });
+  }
 
   // File upload
   const fileUploadArea = document.getElementById('fileUploadArea');
@@ -816,15 +865,14 @@ async function handleGenerate() {
     }
 
     state.novels = result.novels;
-    updateProgress(100, 'Done!');
-
+    updateProgress(95, 'Generating thumbnails...');
     setTimeout(() => {
       showProgress(false);
       renderResults(state.novels);
-      showToast(`Successfully generated ${state.novels.length} novel templates!`, 'success');
-      // Start cover thumbnails generation in background (for review + export).
+      showToast(`Generated ${state.novels.length} templates. Generating thumbnails...`, 'success');
+      // Generate cover + thumbnail for each template (for review + export).
       generateCoversForAllTemplates();
-    }, 500);
+    }, 300);
 
   } catch (error) {
     console.error('Generation error:', error);
@@ -896,7 +944,7 @@ async function generateCoversForAllTemplates() {
   const concurrency = Math.min(3, indices.length);
   const queue = indices.slice();
   let done = 0;
-  showToast(`Generating ${indices.length} cover thumbnails...`, 'info');
+  showToast(`Generating ${indices.length} thumbnails for templates...`, 'info');
 
   const worker = async () => {
     while (queue.length) {
