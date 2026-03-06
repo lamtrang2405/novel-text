@@ -305,8 +305,23 @@ function getExampleTemplates() {
   ];
 }
 
+function stampCollectionAndCategoriesFromForm(novels) {
+  const collection = safeStr(document.getElementById('collectionName')?.value);
+  const cateogories = safeStr(document.getElementById('categoryName')?.value);
+  if (!Array.isArray(novels)) return;
+  novels.forEach(novel => {
+    if (!novel || typeof novel !== 'object') return;
+    if (collection) novel.collection = collection;
+    if (cateogories) {
+      novel.cateogories = cateogories;
+      if (!novel.genre) novel.genre = cateogories;
+    }
+  });
+}
+
 function loadExampleTemplates() {
   state.novels = getExampleTemplates();
+  stampCollectionAndCategoriesFromForm(state.novels);
   const section = document.getElementById('resultsSection');
   const countEl = document.getElementById('resultsCount');
   const container = document.getElementById('novelsContainer');
@@ -321,7 +336,8 @@ function loadExampleTemplates() {
   });
   attachEditSyncListeners(container);
   section.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  showToast('Example templates loaded. Try Download templates (CSV/XLSX/ZIP).', 'success');
+  showToast('Example templates loaded. Generating thumbnails…', 'success');
+  generateCoversForAllTemplates();
 }
 
 // --- Small helpers ---
@@ -419,6 +435,26 @@ function pickCoverDataUrl(novelIndex, novel) {
   return (typeof first === 'string' && first.startsWith('data:image/')) ? first : '';
 }
 
+/** Before export: ensure every novel has cover + thumbnail so thumbnail/cover columns are filled. */
+async function ensureThumbnailsForExport() {
+  const novels = state.novels || [];
+  if (!Array.isArray(novels) || !novels.length) return;
+  const missing = novels
+    .map((n, i) => (typeof n?.cover === 'string' && n.cover.startsWith('data:image/')) ? -1 : i)
+    .filter(i => i >= 0);
+  if (!missing.length) return;
+  showToast(`Generating ${missing.length} missing thumbnail(s)…`, 'info');
+  for (const i of missing) {
+    try {
+      await generateCoverForNovel(i);
+    } catch (e) {
+      console.warn('Thumbnail generation failed for novel', i, e);
+    }
+    await new Promise(r => setTimeout(r, 200));
+  }
+  showToast('Thumbnails ready for export', 'success');
+}
+
 // --- Export: CSV / XLSX ---
 async function handleExportCsv() {
   try {
@@ -426,6 +462,7 @@ async function handleExportCsv() {
       showToast('Nothing to export yet. Generate novel templates first.', 'error');
       return;
     }
+    await ensureThumbnailsForExport();
     const collection = getExportCollection();
     const header = ['thumbnail', 'cover', 'title', 'author', 'cateogories', 'tag', 'collection'];
     const lines = [header.map(csvEscape).join(',')];
@@ -464,6 +501,7 @@ async function handleExportZipPackage() {
       showToast('ZIP export library failed to load. Reload and try again.', 'error');
       return;
     }
+    await ensureThumbnailsForExport();
 
     // Ensure we have thumbnails for each cover.
     for (let i = 0; i < state.novels.length; i++) {
@@ -560,6 +598,7 @@ async function handleExportXlsx() {
       showToast('XLSX export library failed to load. Reload and try again.', 'error');
       return;
     }
+    await ensureThumbnailsForExport();
     const collection = getExportCollection();
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet('Novels');
@@ -579,9 +618,10 @@ async function handleExportXlsx() {
     for (let i = 0; i < state.novels.length; i++) {
       const novel = state.novels[i] || {};
       const rowNumber = i + 2;
+      const cover = pickCoverDataUrl(i, novel);
       ws.addRow({
-        thumbnail: '',
-        cover: '',
+        thumbnail: cover ? '[thumbnail]' : '',
+        cover: cover ? '[cover]' : '',
         title: safeStr(novel.title),
         author: safeStr(novel.authorName || novel.author),
         categories: getCategoriesForExport(novel),
@@ -589,10 +629,9 @@ async function handleExportXlsx() {
         collection: safeStr(novel.collection) || collection,
       });
 
-      const cover = pickCoverDataUrl(i, novel);
       if (cover) {
         const coverResized = await resizeDataUrl(cover, 360, 220, 'image/png');
-        const thumbResized = await resizeDataUrl(cover, 110, 110, 'image/png');
+        const thumbResized = await resizeDataUrl(novel.thumbnail && novel.thumbnail.startsWith('data:image/') ? novel.thumbnail : cover, 110, 110, 'image/png');
         const coverInfo = dataUrlToBase64Info(coverResized);
         const thumbInfo = dataUrlToBase64Info(thumbResized);
 
@@ -1061,18 +1100,8 @@ async function handleGenerate() {
     }
 
     state.novels = result.novels;
-    // Stamp template metadata from selected dropdowns (authoritative).
-    if (formData.collectionName || formData.cateogoriesName) {
-      state.novels.forEach(novel => {
-        if (!novel || typeof novel !== 'object') return;
-        if (formData.collectionName) novel.collection = formData.collectionName;
-        if (formData.cateogoriesName) {
-          novel.cateogories = formData.cateogoriesName;
-          // Keep compatibility with older fields
-          if (!novel.genre) novel.genre = formData.cateogoriesName;
-        }
-      });
-    }
+    // Always stamp collection and categories from dropdown so export columns have data.
+    stampCollectionAndCategoriesFromForm(state.novels);
     updateProgress(95, 'Generating thumbnails...');
     setTimeout(() => {
       showProgress(false);
@@ -2476,8 +2505,39 @@ async function callGeminiTTS(text, novel, segmentRaw = null) {
   return pcmToWavBlob(b64);
 }
 
-// --- Call SubNP Free Image API (replaces Gemini - no API key needed) ---
-async function callImageGenerationAPI(prompt, novel) {
+// --- Gemini Imagen: thumbnail/cover generation (when AI provider is Gemini and key set) ---
+async function callGeminiImagen(prompt) {
+  const apiKey = getApiKey();
+  if (!apiKey) return null;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-002:predict?key=${encodeURIComponent(apiKey)}`;
+  const body = {
+    instances: [{ prompt: prompt }],
+    parameters: { sampleCount: 1 }
+  };
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`Gemini Imagen error: ${response.status} ${err}`);
+  }
+  const data = await response.json();
+  // Response: predictions[].bytesBase64Encoded or predictions[].image.bytesBase64Encoded
+  const pred = data.predictions && data.predictions[0];
+  if (!pred) throw new Error('No image in Gemini Imagen response');
+  let b64 = pred.bytesBase64Encoded || (pred.image && pred.image.bytesBase64Encoded);
+  if (typeof b64 !== 'string' && pred.structValue && pred.structValue.fields && pred.structValue.fields.bytesBase64Encoded) {
+    const f = pred.structValue.fields.bytesBase64Encoded;
+    b64 = f.stringValue || f.string_value;
+  }
+  if (!b64) throw new Error('No image bytes in Gemini Imagen response');
+  return `data:image/png;base64,${b64}`;
+}
+
+// --- Free image API fallback (no key required) ---
+async function callFreeImageAPI(prompt, novel) {
   const tone = novel?.narratorTone || '';
   const background = novel?.background || '';
   const styleHint = [tone, background].filter(Boolean).join('. ');
@@ -2490,9 +2550,7 @@ async function callImageGenerationAPI(prompt, novel) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ prompt: fullPrompt, model: 'turbo' }),
   });
-  if (!response.ok) {
-    throw new Error(`Image API error: ${response.status}`);
-  }
+  if (!response.ok) throw new Error(`Image API error: ${response.status}`);
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let imageUrl = null;
@@ -2521,6 +2579,25 @@ async function callImageGenerationAPI(prompt, novel) {
     r.onerror = () => reject(new Error('Failed to read image'));
     r.readAsDataURL(blob);
   });
+}
+
+// --- Unified image generation: Gemini Imagen when provider is Gemini + key; else free API (DeepSeek has no image API) ---
+async function callImageGenerationAPI(prompt, novel) {
+  const fullPrompt = `Book cover illustration for a novel. No text, no typography, no watermark.
+Title concept: "${novel?.title || 'Untitled'}".
+Genre: ${novel?.genre || novel?.category || 'Fiction'}.
+Setting/background: ${novel?.background || 'not specified'}.
+Main mood/tone: ${novel?.narratorTone || ''}.
+Composition: centered subject, cinematic lighting, high detail, professional cover art.`;
+  const effectivePrompt = prompt && prompt.length > 50 ? prompt : fullPrompt;
+  if (getAIProvider() === 'gemini' && getApiKey()) {
+    try {
+      return await callGeminiImagen(effectivePrompt);
+    } catch (e) {
+      console.warn('Gemini Imagen failed, falling back to free API:', e?.message);
+    }
+  }
+  return callFreeImageAPI(effectivePrompt, novel);
 }
 
 // --- Generate Audio for a single segment ---
