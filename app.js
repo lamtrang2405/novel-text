@@ -167,6 +167,7 @@ function initApp() {
   // Event listeners
   const genBtn = document.getElementById('generateBtn');
   if (genBtn) genBtn.addEventListener('click', handleGenerate);
+  document.getElementById('loadExampleBtn')?.addEventListener('click', loadExampleTemplates);
   document.getElementById('testApiBtn')?.addEventListener('click', handleTestApi);
   document.getElementById('generateAllStoriesBtn')?.addEventListener('click', handleGenerateAllStories);
 
@@ -247,6 +248,80 @@ function renderChangelog() {
       </ul>
     </div>
   `).join('');
+}
+
+// --- Example templates (output sample so you can try export without generating) ---
+function getExampleTemplates() {
+  const today = new Date().toISOString().split('T')[0];
+  return [
+    {
+      title: 'Shadows of the Empathic Order',
+      synopsis: 'In a world where emotions manifest as physical powers, a young woman discovers she can absorb others\' pain—and their memories. When the Empathic Order recruits her to hunt a rogue empath, she must choose between duty and the truth behind the war that shattered her family.',
+      draftScript: 'Dark fantasy. Protagonist has empathy-based power. Conflict: Order vs Void Syndicate. Themes: trauma, healing, belonging.',
+      characters: [
+        { name: 'Elara', role: 'protagonist', age: '22', description: 'Empath who absorbs pain and memories.', arc: 'From hiding her power to leading a reckoning.', gender: 'female' },
+        { name: 'Kael', role: 'antagonist', age: '30', description: 'Rogue empath, former Order knight.', arc: 'Revealed as victim of Order cover-up.', gender: 'male' }
+      ],
+      authorName: 'Example Author',
+      releaseDate: today,
+      narratorTone: 'Third-person limited, tense and atmospheric.',
+      background: 'Neo-Victorian city where emotion-magic is regulated by the Order.',
+      writingLanguage: 'English',
+      chapters: [
+        { chapterNumber: 1, title: 'The Awakening', summary: 'Elara\'s power surfaces during an attack.' },
+        { chapterNumber: 2, title: 'The Order', summary: 'Recruited; first mission to find Kael.' },
+        { chapterNumber: 3, title: 'The Truth', summary: 'Discovers the Order\'s lie about the war.' }
+      ],
+      themes: ['trauma', 'identity', 'power'],
+      genre: 'Dark Fantasy',
+      category: 'Adult Fiction',
+      collection: 'Passion Exclusives',
+      cateogories: 'Fantasy'
+    },
+    {
+      title: 'Midnight at the Inkwell',
+      synopsis: 'A ghostwriter for a reclusive celebrity novelist uncovers a real murder tied to the author\'s past. To finish the book and stay alive, she must piece together the story from coded manuscripts and dangerous interviews.',
+      draftScript: 'Mystery thriller. Ghostwriter protagonist. Celebrity author with a secret. Murder plot mirrors the novel-in-progress.',
+      characters: [
+        { name: 'Maya', role: 'protagonist', age: '28', description: 'Ghostwriter, sharp and observant.', arc: 'From outsider to confronting the past.', gender: 'female' },
+        { name: 'Julian Cross', role: 'supporting', age: '55', description: 'Reclusive bestselling author.', arc: 'From enigma to key witness.', gender: 'male' }
+      ],
+      authorName: 'Example Author',
+      releaseDate: today,
+      narratorTone: 'First-person, wry and suspenseful.',
+      background: 'New York publishing world; Vermont estate.',
+      writingLanguage: 'English',
+      chapters: [
+        { chapterNumber: 1, title: 'The Contract', summary: 'Maya takes the ghostwriting job.' },
+        { chapterNumber: 2, title: 'The Manuscript', summary: 'Coded pages hint at a real crime.' },
+        { chapterNumber: 3, title: 'The Murder', summary: 'A body turns up; the book and reality collide.' }
+      ],
+      themes: ['identity', 'truth', 'art'],
+      genre: 'Suspense Thriller',
+      category: 'Adult Fiction',
+      collection: 'Top Picks',
+      cateogories: 'Suspense Thriller'
+    }
+  ];
+}
+
+function loadExampleTemplates() {
+  state.novels = getExampleTemplates();
+  const section = document.getElementById('resultsSection');
+  const countEl = document.getElementById('resultsCount');
+  const container = document.getElementById('novelsContainer');
+  if (!section || !container) return;
+  section.classList.add('active');
+  if (countEl) countEl.textContent = `${state.novels.length} example templates`;
+  container.innerHTML = '';
+  state.novels.forEach((novel, index) => {
+    const card = createNovelCard(novel, index);
+    card.style.animationDelay = `${index * 0.1}s`;
+    container.appendChild(card);
+  });
+  attachEditSyncListeners(container);
+  section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  showToast('Example templates loaded. Try Download templates (CSV/XLSX/ZIP).', 'success');
 }
 
 // --- Small helpers ---
