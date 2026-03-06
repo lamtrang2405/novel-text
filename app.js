@@ -18,6 +18,33 @@ const state = {
   speakingSegment: null, // { audioIndex, segmentIndex } - for stopping TTS
 };
 
+// --- UI Styles (covers + chapters) ---
+function injectUiStyles() {
+  const id = 'novel_text_patches_styles';
+  if (document.getElementById(id)) return;
+  const style = document.createElement('style');
+  style.id = id;
+  style.textContent = `
+    .novel-cover-thumb {
+      width: 44px;
+      height: 44px;
+      border-radius: 12px;
+      object-fit: cover;
+      border: 1px solid rgba(255,255,255,0.14);
+      box-shadow: 0 8px 18px rgba(0,0,0,0.35);
+      margin-left: 10px;
+      flex: 0 0 auto;
+    }
+    .chapters-wrap { display: grid; gap: 12px; }
+    .chapter-block { border: 1px solid rgba(120, 128, 160, 0.25); background: rgba(255,255,255,0.03); border-radius: 14px; padding: 12px 12px; }
+    .chapter-hdr { display:flex; gap:10px; align-items:baseline; justify-content:space-between; margin-bottom: 8px; }
+    .chapter-title { font-weight: 700; letter-spacing: 0.2px; }
+    .chapter-meta { opacity: 0.75; font-size: 12px; }
+    .chapter-body { white-space: pre-wrap; line-height: 1.65; }
+  `;
+  document.head.appendChild(style);
+}
+
 // --- DOM Ready ---
 document.addEventListener('DOMContentLoaded', () => {
   try {
@@ -29,6 +56,10 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 function initApp() {
+  injectUiStyles();
+
+  renderChangelog();
+
   // Restore from localStorage
   const savedKeys = localStorage.getItem('gemini_api_keys') || localStorage.getItem('gemini_api_key');
   const apiKeyEl = document.getElementById('apiKey');
@@ -88,6 +119,14 @@ function initApp() {
   document.getElementById('ai33ApiKey')?.addEventListener('input', (e) => localStorage.setItem('ai33_api_key', e.target.value));
   document.getElementById('ai33BaseUrl')?.addEventListener('input', (e) => localStorage.setItem('ai33_base_url', e.target.value));
 
+  // Export collection (template detail)
+  const exportCollectionEl = document.getElementById('exportCollection');
+  if (exportCollectionEl) {
+    const saved = localStorage.getItem('export_collection') || '';
+    if (saved) exportCollectionEl.value = saved;
+    exportCollectionEl.addEventListener('input', (e) => localStorage.setItem('export_collection', e.target.value || ''));
+  }
+
   updateApiStatusBadge();
 
   // Event listeners
@@ -96,6 +135,8 @@ function initApp() {
   document.getElementById('testApiBtn')?.addEventListener('click', handleTestApi);
   document.getElementById('generateAllStoriesBtn')?.addEventListener('click', handleGenerateAllStories);
   document.getElementById('downloadAllBtn').addEventListener('click', handleDownloadAll);
+  document.getElementById('exportCsvBtn')?.addEventListener('click', handleExportCsv);
+  document.getElementById('exportXlsxBtn')?.addEventListener('click', handleExportXlsx);
 
   // File upload
   const fileUploadArea = document.getElementById('fileUploadArea');
@@ -121,6 +162,230 @@ function initApp() {
       handleFileUpload(e.target.files[0]);
     }
   });
+}
+
+function renderChangelog() {
+  const el = document.getElementById('changelogList');
+  if (!el) return;
+
+  const items = [
+    {
+      version: '2026-03-06',
+      bullets: [
+        'Multi-flow: Generate multiple stories in parallel using multiple API keys',
+        'Full story view separated by chapters (with [CHAPTER N] markers)',
+        'Auto-generate cover + thumbnail for each template during review',
+        'Export: CSV + XLSX (XLSX embeds cover + thumbnail images)',
+      ],
+    },
+  ];
+
+  el.innerHTML = items.map(i => `
+    <div style="margin-bottom:10px">
+      <div style="font-weight:700; margin-bottom:6px">${i.version}</div>
+      <ul style="margin:0; padding-left: 18px; color: rgba(255,255,255,0.88)">
+        ${i.bullets.map(b => `<li style="margin: 4px 0">${b}</li>`).join('')}
+      </ul>
+    </div>
+  `).join('');
+}
+
+// --- Small helpers ---
+function safeStr(v) {
+  if (v == null) return '';
+  if (Array.isArray(v)) return v.map(safeStr).filter(Boolean).join(', ');
+  if (typeof v === 'object') return '';
+  return String(v).trim();
+}
+
+function getExportCollection() {
+  return safeStr(document.getElementById('exportCollection')?.value);
+}
+
+function getCategoriesForExport(novel) {
+  const cat = safeStr(novel?.category);
+  const genre = safeStr(novel?.genre);
+  if (cat && genre && cat !== genre) return `${cat} | ${genre}`;
+  return cat || genre || '';
+}
+
+function getTagsForExport(novel) {
+  if (Array.isArray(novel?.themes) && novel.themes.length) return novel.themes.map(safeStr).filter(Boolean).join(', ');
+  if (Array.isArray(novel?.tags) && novel.tags.length) return novel.tags.map(safeStr).filter(Boolean).join(', ');
+  return safeStr(novel?.tag) || '';
+}
+
+function csvEscape(v) {
+  const s = safeStr(v);
+  if (s.includes('"') || s.includes(',') || s.includes('\n') || s.includes('\r')) return `"${s.replace(/"/g, '""')}"`;
+  return s;
+}
+
+function downloadBlob(blob, filename) {
+  const a = document.createElement('a');
+  const url = URL.createObjectURL(blob);
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
+}
+
+function dataUrlToBase64Info(dataUrl) {
+  const m = /^data:image\/([a-zA-Z0-9+.-]+);base64,(.+)$/.exec(dataUrl || '');
+  if (!m) return null;
+  let ext = m[1].toLowerCase();
+  if (ext === 'jpeg') ext = 'jpg';
+  if (!['png', 'jpg', 'gif', 'webp', 'bmp'].includes(ext)) ext = 'png';
+  return { extension: ext, base64: dataUrl };
+}
+
+function resizeDataUrl(dataUrl, maxW, maxH, outType = 'image/png') {
+  return new Promise((resolve) => {
+    if (!dataUrl) return resolve('');
+    const img = new Image();
+    img.onload = () => {
+      const w = img.width || 1;
+      const h = img.height || 1;
+      const scale = Math.min(maxW / w, maxH / h, 1);
+      const tw = Math.max(1, Math.round(w * scale));
+      const th = Math.max(1, Math.round(h * scale));
+      const canvas = document.createElement('canvas');
+      canvas.width = tw;
+      canvas.height = th;
+      const ctx = canvas.getContext('2d');
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(img, 0, 0, tw, th);
+      try {
+        resolve(canvas.toDataURL(outType));
+      } catch (_) {
+        resolve(dataUrl);
+      }
+    };
+    img.onerror = () => resolve('');
+    img.src = dataUrl;
+  });
+}
+
+function pickCoverDataUrl(novelIndex, novel) {
+  const maybe = novel?.cover || novel?.coverImage || novel?.image || novel?.thumbnail;
+  if (typeof maybe === 'string' && maybe.startsWith('data:image/')) return maybe;
+  const scenes = state.generatedScenes?.[novelIndex];
+  if (!scenes) return '';
+  const keys = Object.keys(scenes)
+    .map(k => parseInt(k, 10))
+    .filter(n => !Number.isNaN(n))
+    .sort((a, b) => a - b);
+  if (!keys.length) return '';
+  const first = scenes[keys[0]];
+  return (typeof first === 'string' && first.startsWith('data:image/')) ? first : '';
+}
+
+// --- Export: CSV / XLSX ---
+async function handleExportCsv() {
+  try {
+    if (!Array.isArray(state.novels) || !state.novels.length) {
+      showToast('Nothing to export yet. Generate novel templates first.', 'error');
+      return;
+    }
+    const collection = getExportCollection();
+    const header = ['thumbnail', 'cover', 'title', 'author', 'cateogories', 'tag', 'collection'];
+    const lines = [header.map(csvEscape).join(',')];
+    for (let i = 0; i < state.novels.length; i++) {
+      const novel = state.novels[i] || {};
+      const cover = pickCoverDataUrl(i, novel);
+      const thumb = cover ? await resizeDataUrl(cover, 96, 96, 'image/png') : '';
+      const row = [
+        thumb,
+        cover,
+        safeStr(novel.title),
+        safeStr(novel.authorName || novel.author),
+        getCategoriesForExport(novel),
+        getTagsForExport(novel),
+        safeStr(novel.collection) || collection,
+      ];
+      lines.push(row.map(csvEscape).join(','));
+    }
+    const csv = lines.join('\r\n');
+    downloadBlob(new Blob([csv], { type: 'text/csv;charset=utf-8' }), 'novels_export.csv');
+    showToast('Exported CSV', 'success');
+  } catch (e) {
+    console.error('CSV export failed', e);
+    showToast('CSV export failed: ' + (e?.message || String(e)), 'error');
+  }
+}
+
+async function handleExportXlsx() {
+  try {
+    if (!Array.isArray(state.novels) || !state.novels.length) {
+      showToast('Nothing to export yet. Generate novel templates first.', 'error');
+      return;
+    }
+    if (!window.ExcelJS) {
+      showToast('XLSX export library failed to load. Reload and try again.', 'error');
+      return;
+    }
+    const collection = getExportCollection();
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Novels');
+    ws.columns = [
+      { header: 'thumbnail', key: 'thumbnail', width: 14 },
+      { header: 'cover', key: 'cover', width: 28 },
+      { header: 'title', key: 'title', width: 36 },
+      { header: 'author', key: 'author', width: 22 },
+      { header: 'cateogories', key: 'categories', width: 28 },
+      { header: 'tag', key: 'tag', width: 34 },
+      { header: 'collection', key: 'collection', width: 22 },
+    ];
+    ws.getRow(1).font = { bold: true };
+    ws.getRow(1).alignment = { vertical: 'middle' };
+    ws.getRow(1).height = 20;
+
+    for (let i = 0; i < state.novels.length; i++) {
+      const novel = state.novels[i] || {};
+      const rowNumber = i + 2;
+      ws.addRow({
+        thumbnail: '',
+        cover: '',
+        title: safeStr(novel.title),
+        author: safeStr(novel.authorName || novel.author),
+        categories: getCategoriesForExport(novel),
+        tag: getTagsForExport(novel),
+        collection: safeStr(novel.collection) || collection,
+      });
+
+      const cover = pickCoverDataUrl(i, novel);
+      if (cover) {
+        const coverResized = await resizeDataUrl(cover, 360, 220, 'image/png');
+        const thumbResized = await resizeDataUrl(cover, 110, 110, 'image/png');
+        const coverInfo = dataUrlToBase64Info(coverResized);
+        const thumbInfo = dataUrlToBase64Info(thumbResized);
+
+        if (thumbInfo) {
+          const imgId = wb.addImage({ base64: thumbInfo.base64, extension: thumbInfo.extension });
+          ws.addImage(imgId, { tl: { col: 0, row: rowNumber - 1 }, ext: { width: 96, height: 96 } });
+        }
+        if (coverInfo) {
+          const imgId = wb.addImage({ base64: coverInfo.base64, extension: coverInfo.extension });
+          ws.addImage(imgId, { tl: { col: 1, row: rowNumber - 1 }, ext: { width: 210, height: 120 } });
+        }
+        ws.getRow(rowNumber).height = 92;
+      } else {
+        ws.getRow(rowNumber).height = 20;
+      }
+      ws.getRow(rowNumber).alignment = { vertical: 'top', wrapText: true };
+    }
+
+    ws.views = [{ state: 'frozen', ySplit: 1 }];
+    const buf = await wb.xlsx.writeBuffer();
+    downloadBlob(new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), 'novels_export.xlsx');
+    showToast('Exported XLSX', 'success');
+  } catch (e) {
+    console.error('XLSX export failed', e);
+    showToast('XLSX export failed: ' + (e?.message || String(e)), 'error');
+  }
 }
 
 // --- File Upload ---
@@ -557,6 +822,8 @@ async function handleGenerate() {
       showProgress(false);
       renderResults(state.novels);
       showToast(`Successfully generated ${state.novels.length} novel templates!`, 'success');
+      // Start cover thumbnails generation in background (for review + export).
+      generateCoversForAllTemplates();
     }, 500);
 
   } catch (error) {
@@ -572,6 +839,82 @@ async function handleGenerate() {
     btn.classList.remove('loading');
     btn.disabled = false;
   }
+}
+
+// --- Auto-generate cover + thumbnail for templates (for review UI + export) ---
+function ensureCoverThumbInCard(index) {
+  const novel = state.novels?.[index];
+  if (!novel) return;
+  const dataUrl =
+    (typeof novel.thumbnail === 'string' && novel.thumbnail.startsWith('data:image/')) ? novel.thumbnail
+      : (typeof novel.cover === 'string' && novel.cover.startsWith('data:image/')) ? novel.cover : '';
+  if (!dataUrl) return;
+  const card = document.querySelector(`.novel-card[data-index="${index}"]`);
+  const info = card?.querySelector('.novel-card-header .novel-info');
+  if (!info) return;
+  if (info.querySelector(`img.novel-cover-thumb[data-index="${index}"]`)) return;
+  const img = document.createElement('img');
+  img.className = 'novel-cover-thumb';
+  img.dataset.index = String(index);
+  img.alt = `Cover ${index + 1}`;
+  img.src = dataUrl;
+  info.appendChild(img);
+}
+
+async function generateCoverForNovel(index) {
+  const novel = state.novels?.[index];
+  if (!novel) return;
+  if (typeof novel.cover === 'string' && novel.cover.startsWith('data:image/')) {
+    ensureCoverThumbInCard(index);
+    return;
+  }
+  if (typeof callImageGenerationAPI !== 'function') return;
+
+  const prompt = `Book cover illustration for a novel. No text, no typography, no watermark.
+Title concept: "${novel.title || 'Untitled'}".
+Genre: ${novel.genre || novel.category || 'Fiction'}.
+Setting/background: ${novel.background || 'not specified'}.
+Main mood/tone: ${novel.narratorTone || ''}.
+Composition: centered subject, cinematic lighting, high detail, professional cover art.`;
+
+  const cover = await callImageGenerationAPI(prompt, novel);
+  novel.cover = cover;
+  novel.thumbnail = await resizeDataUrl(cover, 128, 128, 'image/png');
+  ensureCoverThumbInCard(index);
+}
+
+async function generateCoversForAllTemplates() {
+  const novels = state.novels || [];
+  if (!Array.isArray(novels) || !novels.length) return;
+
+  const indices = novels.map((_, i) => i).filter(i => !(typeof novels[i]?.cover === 'string' && novels[i].cover.startsWith('data:image/')));
+  if (!indices.length) {
+    indices.forEach(i => ensureCoverThumbInCard(i));
+    return;
+  }
+
+  const concurrency = Math.min(3, indices.length);
+  const queue = indices.slice();
+  let done = 0;
+  showToast(`Generating ${indices.length} cover thumbnails...`, 'info');
+
+  const worker = async () => {
+    while (queue.length) {
+      const i = queue.shift();
+      if (i == null) break;
+      try {
+        await generateCoverForNovel(i);
+        done++;
+        showToast(`Cover images: ${done}/${indices.length}`, 'info');
+      } catch (e) {
+        console.warn('Cover generation failed', i, e);
+      }
+      await new Promise(r => setTimeout(r, 250));
+    }
+  };
+
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
+  showToast('Cover thumbnails ready', 'success');
 }
 
 // --- Render Results ---
@@ -592,6 +935,11 @@ function renderResults(novels) {
 
   // Attach edit sync listeners
   attachEditSyncListeners(container);
+
+  // Ensure thumbs persist even when cards rerender
+  try {
+    novels.forEach((_, i) => ensureCoverThumbInCard(i));
+  } catch (_) {}
 
   // Scroll to results
   section.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -629,11 +977,15 @@ function createNovelCard(novel, index) {
   }
 
   const isReviewed = state.reviewedNovels.has(index);
+  const coverThumb = (typeof novel?.thumbnail === 'string' && novel.thumbnail.startsWith('data:image/'))
+    ? novel.thumbnail
+    : (typeof novel?.cover === 'string' && novel.cover.startsWith('data:image/')) ? novel.cover : '';
   card.innerHTML = `
     <div class="novel-card-header" onclick="toggleNovelCard(${index})">
       <div class="novel-info">
         <div class="novel-number">${index + 1}</div>
         <div class="novel-title editable" contenteditable="true" data-novel="${index}" data-field="title">${escapeHtml(novel.title || 'Untitled Novel')}</div>
+        ${coverThumb ? `<img class="novel-cover-thumb" data-index="${index}" src="${coverThumb}" alt="Cover ${index + 1}"/>` : ''}
       </div>
       <div class="actions">
         ${isReviewed
@@ -821,6 +1173,9 @@ function toggleManualReview(index) {
       : 'Manual review revoked.',
     'info'
   );
+
+  // Card rerender may drop the cover thumb.
+  try { ensureCoverThumbInCard(index); } catch (_) {}
 }
 
 // --- Sync edits from contenteditable back to state ---
@@ -1101,33 +1456,59 @@ async function handleGenerateAllStories() {
     'info');
     return;
   }
+
+  const keys = getApiKeys();
+  if (!keys.length) {
+    showToast(`Add one or more API keys in Settings to generate stories.`, 'error');
+    return;
+  }
+
   const btn = document.getElementById('generateAllStoriesBtn');
   if (!btn || btn.disabled) return;
   btn.classList.add('loading');
   btn.disabled = true;
+
+  const queue = eligible.slice();
+  const workerCount = Math.max(1, Math.min(keys.length, queue.length));
   let done = 0;
   const total = eligible.length;
-  for (const index of eligible) {
-    try {
-      await generateFullStory(index);
-      done++;
-      if (done < total) showToast(`Story ${done}/${total} done. Continuing...`, 'info');
-    } catch (e) {
-      showToast(`Stopped after ${done} stories. ${e.message}`, 'error');
-      break;
+  const failed = [];
+
+  showToast(`Generating ${total} stories in parallel (${workerCount} flows)...`, 'info');
+
+  const worker = async (workerIdx) => {
+    const key = keys[workerIdx % keys.length];
+    while (queue.length) {
+      const index = queue.shift();
+      if (index == null) break;
+      try {
+        await generateFullStory(index, key);
+        done++;
+        showToast(`Stories: ${done}/${total}`, 'info');
+        await new Promise(r => setTimeout(r, 350));
+      } catch (e) {
+        failed.push({ index, message: e?.message || String(e) });
+      }
     }
-  }
+  };
+
+  await Promise.all(Array.from({ length: workerCount }, (_, i) => worker(i)));
+
   btn.classList.remove('loading');
   btn.disabled = false;
-  if (done === total) showToast(`All ${total} stories generated!`, 'success');
+  if (failed.length) {
+    showToast(`Generated ${done}/${total}. Failed: ${failed.length}. Try again to retry the remaining.`, 'error');
+  } else {
+    showToast(`All ${total} stories generated!`, 'success');
+  }
 }
 
 // --- Generate Full Story ---
-async function generateFullStory(index) {
+async function generateFullStory(index, apiKeyOverride) {
   const novel = state.novels[index];
   if (!novel) return;
 
-  const apiKey = getApiKey();
+  const apiKey = apiKeyOverride || getApiKey();
   if (!apiKey) {
     showToast('Please enter your API key first', 'error');
     return;
@@ -1183,19 +1564,27 @@ ${characterDetails || 'Not specified'}
 ## CHAPTER OUTLINE
 ${chapterDetails || 'Write 5-10 chapters'}
 
-## INSTRUCTIONS
-Write the COMPLETE story following the chapter outline above. For each chapter:
-- Write a full chapter title header
-- Write detailed, engaging prose (at least 800-1500 words per chapter)
-- Use the specified narrator tone and writing style
-- Develop the characters according to their arcs
-- Include vivid descriptions, dialogue, and emotional depth
-- Write in ${novel.writingLanguage || 'English'}
-- Make the story compelling, immersive, and publish-ready
+## OUTPUT FORMAT (CRITICAL)
+You MUST output the story separated into chapters using EXACT markers like this, for EVERY chapter:
 
-Write the full story now. Output ONLY the story text with chapter headers, no meta-commentary.`;
+[CHAPTER 1]
+Title: <chapter title>
+<full chapter prose here>
+[/CHAPTER 1]
 
-    const storyText = await callGeminiAPIRaw(storyPrompt);
+[CHAPTER 2]
+Title: <chapter title>
+<full chapter prose here>
+[/CHAPTER 2]
+
+Rules:
+- Do NOT output anything before the first [CHAPTER 1] marker.
+- Do NOT add meta commentary, notes, or explanations.
+- Chapter prose should be publish-ready, with dialogue and vivid description.
+- Write in ${novel.writingLanguage || 'English'}.
+`;
+
+    const storyText = await callGeminiAPIRawWithKey(storyPrompt, apiKeyOverride);
 
     // Store the story
     state.stories[index] = storyText;
@@ -1203,7 +1592,7 @@ Write the full story now. Output ONLY the story text with chapter headers, no me
     // Display it
     const storySection = document.getElementById(`storySection_${index}`);
     const storyContent = document.getElementById(`storyContent_${index}`);
-    storyContent.textContent = storyText;
+    renderStoryChapters(index, storyText);
     storySection.style.display = 'block';
 
     // Update button
@@ -1248,6 +1637,146 @@ async function callGeminiAPIRaw(prompt) {
   const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!text) throw new Error('No content returned from Gemini API');
   return text;
+}
+
+// --- Raw text API call with an optional explicit key (for multi-flow parallel generation) ---
+async function callGeminiAPIRawWithKey(prompt, apiKeyOverride) {
+  if (getAIProvider() === 'deepseek') {
+    const apiKey = apiKeyOverride || getApiKey();
+    if (!apiKey) throw new Error('No API key. Enter your DeepSeek key in the API Key(s) field.');
+    const url = 'https://api.deepseek.com/v1/chat/completions';
+    const body = {
+      model: 'deepseek-chat',
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.85,
+      max_tokens: 8192,
+    };
+    const response = await fetchWithTimeout(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(body),
+    }, 120000);
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err?.error?.message || err?.message || `DeepSeek API error: ${response.status}`);
+    }
+    const data = await response.json();
+    const text = data.choices?.[0]?.message?.content?.trim();
+    if (!text) throw new Error('No content returned from DeepSeek');
+    return text;
+  }
+
+  const apiKey = apiKeyOverride || getApiKey();
+  if (!apiKey) throw new Error('No API key. Enter your Gemini key in the API Key(s) field.');
+  const models = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'];
+  let lastErr = null;
+  for (const model of models) {
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
+      const response = await fetchWithTimeout(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: {
+            temperature: 0.85,
+            topP: 0.95,
+            topK: 40,
+            maxOutputTokens: 65536,
+          },
+        }),
+      }, 120000);
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        lastErr = errData?.error?.message || errData?.message || `API error: ${response.status}`;
+        if (String(lastErr).includes('404') || String(lastErr).toLowerCase().includes('not found') || String(lastErr).includes('Invalid model')) continue;
+        throw new Error(lastErr);
+      }
+      const data = await response.json();
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!text) throw new Error('No content returned from Gemini API');
+      return text;
+    } catch (e) {
+      lastErr = e?.message || lastErr;
+      const m = String(lastErr || '');
+      if (m.includes('404') || m.toLowerCase().includes('not found') || m.includes('Invalid model')) continue;
+      throw e;
+    }
+  }
+  throw new Error(lastErr || 'All Gemini models failed');
+}
+
+// --- Render full story into per-chapter blocks (using [CHAPTER N] markers) ---
+function normalizeNewlines(s) {
+  return String(s || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+}
+
+function parseChaptersFromMarkers(text) {
+  const t = normalizeNewlines(text);
+  const re = /^\[CHAPTER\s+(\d+)\]\s*\n([\s\S]*?)^\[\/CHAPTER\s+\1\]\s*$/gmi;
+  const chapters = [];
+  let m;
+  while ((m = re.exec(t))) {
+    const num = parseInt(m[1], 10);
+    const body = (m[2] || '').trim();
+    let title = '';
+    let content = body;
+    const titleMatch = body.match(/^Title:\s*(.+)\n+/i);
+    if (titleMatch) {
+      title = titleMatch[1].trim();
+      content = body.slice(titleMatch[0].length).trim();
+    }
+    chapters.push({ number: num, title, content });
+  }
+  chapters.sort((a, b) => (a.number || 0) - (b.number || 0));
+  return chapters;
+}
+
+function renderStoryChapters(index, storyText) {
+  const storyContent = document.getElementById(`storyContent_${index}`);
+  if (!storyContent) return;
+
+  const chapters = parseChaptersFromMarkers(storyText || '');
+  if (!chapters.length) {
+    storyContent.setAttribute('contenteditable', 'true');
+    storyContent.textContent = storyText || '';
+    return;
+  }
+
+  storyContent.setAttribute('contenteditable', 'false');
+  storyContent.innerHTML = '';
+  const wrap = document.createElement('div');
+  wrap.className = 'chapters-wrap';
+  chapters.forEach((ch) => {
+    const block = document.createElement('div');
+    block.className = 'chapter-block';
+    const hdr = document.createElement('div');
+    hdr.className = 'chapter-hdr';
+
+    const title = document.createElement('div');
+    title.className = 'chapter-title editable';
+    title.setAttribute('contenteditable', 'true');
+    title.textContent = `Chapter ${ch.number}${ch.title ? ': ' + ch.title : ''}`;
+
+    const meta = document.createElement('div');
+    meta.className = 'chapter-meta';
+    meta.textContent = ch.content ? `${Math.max(1, ch.content.split(/\s+/).filter(Boolean).length)} words` : '';
+
+    const body = document.createElement('div');
+    body.className = 'chapter-body editable';
+    body.setAttribute('contenteditable', 'true');
+    body.textContent = ch.content || '';
+
+    hdr.appendChild(title);
+    hdr.appendChild(meta);
+    block.appendChild(hdr);
+    block.appendChild(body);
+    wrap.appendChild(block);
+  });
+  storyContent.appendChild(wrap);
 }
 
 // --- Download Full Story (uses current edited content from DOM) ---

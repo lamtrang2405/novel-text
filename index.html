@@ -126,6 +126,12 @@
               </select>
             </div>
           </div>
+
+          <div class="settings-section">
+            <h3>Changelog</h3>
+            <div class="form-hint" style="margin-top:6px">What’s new in the tool.</div>
+            <div id="changelogList" style="margin-top:10px"></div>
+          </div>
         </div>
         <div class="settings-footer">
           <button type="button" class="btn btn-primary" id="saveSettingsBtn">Save</button>
@@ -202,6 +208,10 @@
             <input type="text" id="authorName" placeholder="Your pen name or author name">
           </div>
           <div class="form-group">
+            <label for="exportCollection">Collection (for export)</label>
+            <input type="text" id="exportCollection" placeholder="e.g. Series name, project, collection...">
+          </div>
+          <div class="form-group">
             <label for="releaseDate">Release Date</label>
             <input type="date" id="releaseDate">
           </div>
@@ -267,6 +277,8 @@
             <span class="spinner"></span>
             <span class="btn-text">📖 Generate All Stories</span>
           </button>
+          <button class="btn btn-secondary btn-sm" id="exportCsvBtn" title="Export templates to CSV">⬇️ CSV</button>
+          <button class="btn btn-secondary btn-sm" id="exportXlsxBtn" title="Export templates to XLSX (with images)">⬇️ XLSX</button>
           <button class="btn btn-secondary btn-sm" id="downloadAllBtn">📥 Download All</button>
         </div>
       </div>
@@ -278,6 +290,7 @@
   <!-- Toast Container -->
   <div class="toast-container" id="toastContainer"></div>
 
+  <script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
   <script src="app.js?v=17"></script>
 </body>
 
