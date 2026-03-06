@@ -148,12 +148,18 @@ function initApp() {
   document.getElementById('ai33ApiKey')?.addEventListener('input', (e) => localStorage.setItem('ai33_api_key', e.target.value));
   document.getElementById('ai33BaseUrl')?.addEventListener('input', (e) => localStorage.setItem('ai33_base_url', e.target.value));
 
-  // Export collection (template detail)
-  const exportCollectionEl = document.getElementById('exportCollection');
-  if (exportCollectionEl) {
-    const saved = localStorage.getItem('export_collection') || '';
-    if (saved) exportCollectionEl.value = saved;
-    exportCollectionEl.addEventListener('input', (e) => localStorage.setItem('export_collection', e.target.value || ''));
+  // Template metadata: collection + cateogories (persisted)
+  const collectionEl = document.getElementById('collectionName');
+  if (collectionEl) {
+    const saved = localStorage.getItem('template_collection') || '';
+    if (saved) collectionEl.value = saved;
+    collectionEl.addEventListener('change', (e) => localStorage.setItem('template_collection', e.target.value || ''));
+  }
+  const cateogoriesEl = document.getElementById('categoryName');
+  if (cateogoriesEl) {
+    const saved = localStorage.getItem('template_cateogories') || '';
+    if (saved) cateogoriesEl.value = saved;
+    cateogoriesEl.addEventListener('change', (e) => localStorage.setItem('template_cateogories', e.target.value || ''));
   }
 
   updateApiStatusBadge();
@@ -184,6 +190,10 @@ function initApp() {
     document.getElementById('downloadExportXlsxBtn')?.addEventListener('click', () => {
       downloadTemplatesDropdown.classList.remove('open');
       handleExportXlsx();
+    });
+    document.getElementById('downloadExportZipBtn')?.addEventListener('click', () => {
+      downloadTemplatesDropdown.classList.remove('open');
+      handleExportZipPackage();
     });
   }
 
@@ -248,10 +258,12 @@ function safeStr(v) {
 }
 
 function getExportCollection() {
-  return safeStr(document.getElementById('exportCollection')?.value);
+  return safeStr(document.getElementById('collectionName')?.value);
 }
 
 function getCategoriesForExport(novel) {
+  const fixed = safeStr(novel?.cateogories || novel?.categories);
+  if (fixed) return fixed;
   const cat = safeStr(novel?.category);
   const genre = safeStr(novel?.genre);
   if (cat && genre && cat !== genre) return `${cat} | ${genre}`;
@@ -344,11 +356,12 @@ async function handleExportCsv() {
     const lines = [header.map(csvEscape).join(',')];
     for (let i = 0; i < state.novels.length; i++) {
       const novel = state.novels[i] || {};
-      const cover = pickCoverDataUrl(i, novel);
-      const thumb = cover ? await resizeDataUrl(cover, 96, 96, 'image/png') : '';
+      // CSV can’t embed images. Use relative file paths so it works with the .zip package export.
+      const thumbPath = `thumbnails/novel_${i + 1}.png`;
+      const coverPath = `covers/novel_${i + 1}.png`;
       const row = [
-        thumb,
-        cover,
+        thumbPath,
+        coverPath,
         safeStr(novel.title),
         safeStr(novel.authorName || novel.author),
         getCategoriesForExport(novel),
@@ -359,10 +372,106 @@ async function handleExportCsv() {
     }
     const csv = lines.join('\r\n');
     downloadBlob(new Blob([csv], { type: 'text/csv;charset=utf-8' }), 'novels_export.csv');
-    showToast('Exported CSV', 'success');
+    showToast('Exported CSV (use Export package .zip for image files)', 'success');
   } catch (e) {
     console.error('CSV export failed', e);
     showToast('CSV export failed: ' + (e?.message || String(e)), 'error');
+  }
+}
+
+async function handleExportZipPackage() {
+  try {
+    if (!Array.isArray(state.novels) || !state.novels.length) {
+      showToast('Nothing to export yet. Generate novel templates first.', 'error');
+      return;
+    }
+    if (!window.JSZip) {
+      showToast('ZIP export library failed to load. Reload and try again.', 'error');
+      return;
+    }
+
+    // Ensure we have thumbnails for each cover.
+    for (let i = 0; i < state.novels.length; i++) {
+      const novel = state.novels[i] || {};
+      if (!novel.thumbnail && novel.cover) {
+        novel.thumbnail = await resizeDataUrl(novel.cover, 128, 128, 'image/png');
+      }
+    }
+
+    const zip = new JSZip();
+    const thumbs = zip.folder('thumbnails');
+    const covers = zip.folder('covers');
+
+    // CSV that references the packaged file paths
+    const collection = getExportCollection();
+    const header = ['thumbnail', 'cover', 'title', 'author', 'cateogories', 'tag', 'collection'];
+    const lines = [header.map(csvEscape).join(',')];
+
+    const galleryCards = [];
+
+    for (let i = 0; i < state.novels.length; i++) {
+      const novel = state.novels[i] || {};
+      const coverDataUrl = pickCoverDataUrl(i, novel);
+      const thumbDataUrl = novel.thumbnail || (coverDataUrl ? await resizeDataUrl(coverDataUrl, 128, 128, 'image/png') : '');
+
+      const coverPng = coverDataUrl ? await fetch(coverDataUrl).then(r => r.blob()) : null;
+      const thumbPng = thumbDataUrl ? await fetch(thumbDataUrl).then(r => r.blob()) : null;
+
+      const coverName = `novel_${i + 1}.png`;
+      const thumbName = `novel_${i + 1}.png`;
+      if (coverPng) covers.file(coverName, coverPng);
+      if (thumbPng) thumbs.file(thumbName, thumbPng);
+
+      const thumbPath = `thumbnails/${thumbName}`;
+      const coverPath = `covers/${coverName}`;
+      lines.push([
+        thumbPath,
+        coverPath,
+        safeStr(novel.title),
+        safeStr(novel.authorName || novel.author),
+        getCategoriesForExport(novel),
+        getTagsForExport(novel),
+        safeStr(novel.collection) || collection,
+      ].map(csvEscape).join(','));
+
+      galleryCards.push(`
+        <a class="card" href="${coverPath}" target="_blank" rel="noopener">
+          <img src="${thumbPath}" alt="${escapeHtml(safeStr(novel.title) || ('Novel ' + (i + 1)))}"/>
+          <div class="t">${escapeHtml(safeStr(novel.title) || ('Novel ' + (i + 1)))}</div>
+        </a>
+      `);
+    }
+
+    zip.file('templates.csv', lines.join('\r\n'));
+    zip.file('gallery.html', `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Novel thumbnails</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:#0b1020;color:#e8ebf4;margin:0;padding:24px}
+    h1{margin:0 0 16px;font-size:18px}
+    .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:14px}
+    .card{display:block;text-decoration:none;color:inherit;border:1px solid rgba(255,255,255,0.12);border-radius:14px;overflow:hidden;background:rgba(255,255,255,0.04)}
+    .card img{width:100%;height:160px;object-fit:cover;display:block}
+    .card .t{padding:10px 10px;font-size:13px;line-height:1.35;opacity:.92}
+  </style>
+</head>
+<body>
+  <h1>Novel thumbnails (click to open cover)</h1>
+  <div class="grid">
+    ${galleryCards.join('')}
+  </div>
+</body>
+</html>`);
+
+    const blob = await zip.generateAsync({ type: 'blob' });
+    downloadBlob(blob, 'novel_templates_package.zip');
+    showToast('Exported package (.zip)', 'success');
+  } catch (e) {
+    console.error('ZIP export failed', e);
+    showToast('ZIP export failed: ' + (e?.message || String(e)), 'error');
   }
 }
 
@@ -644,6 +753,8 @@ function collectFormData() {
     draftScript: document.getElementById('draftScript').value.trim(),
     characterSystem: document.getElementById('characterSystem').value.trim(),
     authorName: document.getElementById('authorName').value.trim() || 'Unknown Author',
+    collectionName: document.getElementById('collectionName')?.value || '',
+    cateogoriesName: document.getElementById('categoryName')?.value || '',
     releaseDate: document.getElementById('releaseDate').value || new Date().toISOString().split('T')[0],
     narratorTone: document.getElementById('narratorTone').value.trim(),
     writingLanguage: document.getElementById('writingLanguage').value,
@@ -680,6 +791,12 @@ function buildGeminiPrompt(formData) {
   if (formData.referenceText) {
     prompt += `\n**Reference Text (use as style/content inspiration):**\n${formData.referenceText.substring(0, 5000)}`;
   }
+  if (formData.collectionName) {
+    prompt += `\n**Collection (Tên Danh Mục):** ${formData.collectionName}`;
+  }
+  if (formData.cateogoriesName) {
+    prompt += `\n**Cateogories (Tên Thể Loại):** ${formData.cateogoriesName}`;
+  }
 
   prompt += `
 
@@ -699,6 +816,8 @@ Generate exactly ${formData.numNovels} novel templates. Each novel template MUST
 11. **themes** — Array of core themes explored in the novel
 12. **genre** — Primary and secondary genres
 13. **category** — Reader/info category (e.g. "Young Adult", "Adult Fiction", "Children's", "Non-fiction", "Romance", "Fantasy")
+14. **collection** — "${formData.collectionName || ''}"
+15. **cateogories** — "${formData.cateogoriesName || ''}"
 
 Each novel should be DISTINCT — different plot, different character dynamics, different themes — while still being inspired by the creative brief.
 
@@ -723,7 +842,9 @@ You MUST return valid JSON only. No markdown code blocks, no backticks, no expla
       ],
       "themes": ["...", "..."],
       "genre": "...",
-      "category": "..."
+      "category": "...",
+      "collection": "...",
+      "cateogories": "..."
     }
   ]
 }`;
@@ -865,6 +986,18 @@ async function handleGenerate() {
     }
 
     state.novels = result.novels;
+    // Stamp template metadata from selected dropdowns (authoritative).
+    if (formData.collectionName || formData.cateogoriesName) {
+      state.novels.forEach(novel => {
+        if (!novel || typeof novel !== 'object') return;
+        if (formData.collectionName) novel.collection = formData.collectionName;
+        if (formData.cateogoriesName) {
+          novel.cateogories = formData.cateogoriesName;
+          // Keep compatibility with older fields
+          if (!novel.genre) novel.genre = formData.cateogoriesName;
+        }
+      });
+    }
     updateProgress(95, 'Generating thumbnails...');
     setTimeout(() => {
       showProgress(false);
@@ -1028,12 +1161,13 @@ function createNovelCard(novel, index) {
   const coverThumb = (typeof novel?.thumbnail === 'string' && novel.thumbnail.startsWith('data:image/'))
     ? novel.thumbnail
     : (typeof novel?.cover === 'string' && novel.cover.startsWith('data:image/')) ? novel.cover : '';
+  const coverHref = (typeof novel?.cover === 'string' && novel.cover.startsWith('data:image/')) ? novel.cover : coverThumb;
   card.innerHTML = `
     <div class="novel-card-header" onclick="toggleNovelCard(${index})">
       <div class="novel-info">
         <div class="novel-number">${index + 1}</div>
         <div class="novel-title editable" contenteditable="true" data-novel="${index}" data-field="title">${escapeHtml(novel.title || 'Untitled Novel')}</div>
-        ${coverThumb ? `<img class="novel-cover-thumb" data-index="${index}" src="${coverThumb}" alt="Cover ${index + 1}"/>` : ''}
+        ${coverThumb ? `<a href="${coverHref}" target="_blank" rel="noopener" title="Open cover image"><img class="novel-cover-thumb" data-index="${index}" src="${coverThumb}" alt="Cover ${index + 1}"/></a>` : ''}
       </div>
       <div class="actions">
         ${isReviewed
