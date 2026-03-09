@@ -384,6 +384,22 @@ function getTagsForExport(novel) {
   return safeStr(novel?.tag) || '';
 }
 
+/** Chapter outline as plain text (for export columns): "Ch1: Title — Summary\nCh2: ..." */
+function getChapterOutlineText(novel) {
+  if (!novel?.chapters || !novel.chapters.length) return '';
+  return novel.chapters.map(ch =>
+    `Ch${ch.chapterNumber}: ${safeStr(ch.title)} — ${safeStr(ch.summary)}`
+  ).join('\n');
+}
+
+/** Full story text for a novel (from DOM or state), for export and template .txt */
+function getFullStoryText(index) {
+  const contentEl = document.getElementById(`storyContent_${index}`);
+  const fromDom = contentEl?.textContent?.trim();
+  if (fromDom) return fromDom;
+  return safeStr(state.stories[index]);
+}
+
 function csvEscape(v) {
   const s = safeStr(v);
   if (s.includes('"') || s.includes(',') || s.includes('\n') || s.includes('\r')) return `"${s.replace(/"/g, '""')}"`;
@@ -485,7 +501,7 @@ async function handleExportCsv() {
     }
     await ensureThumbnailsForExport();
     const collection = getExportCollection();
-    const header = ['thumbnail', 'cover', 'title', 'author', 'cateogories', 'tag', 'collection'];
+    const header = ['thumbnail', 'cover', 'title', 'author', 'cateogories', 'tag', 'collection', 'chapter_outline', 'full_story'];
     const lines = [header.map(csvEscape).join(',')];
     for (let i = 0; i < state.novels.length; i++) {
       const novel = state.novels[i] || {};
@@ -500,6 +516,8 @@ async function handleExportCsv() {
         getCategoriesForExport(novel),
         getTagsForExport(novel),
         safeStr(novel.collection) || collection,
+        getChapterOutlineText(novel),
+        getFullStoryText(i),
       ];
       lines.push(row.map(csvEscape).join(','));
     }
@@ -538,7 +556,7 @@ async function handleExportZipPackage() {
 
     // CSV that references the packaged file paths
     const collection = getExportCollection();
-    const header = ['thumbnail', 'cover', 'title', 'author', 'cateogories', 'tag', 'collection'];
+    const header = ['thumbnail', 'cover', 'title', 'author', 'cateogories', 'tag', 'collection', 'chapter_outline', 'full_story'];
     const lines = [header.map(csvEscape).join(',')];
 
     const galleryCards = [];
@@ -566,6 +584,8 @@ async function handleExportZipPackage() {
         getCategoriesForExport(novel),
         getTagsForExport(novel),
         safeStr(novel.collection) || collection,
+        getChapterOutlineText(novel),
+        getFullStoryText(i),
       ].map(csvEscape).join(','));
 
       galleryCards.push(`
@@ -631,6 +651,8 @@ async function handleExportXlsx() {
       { header: 'cateogories', key: 'categories', width: 28 },
       { header: 'tag', key: 'tag', width: 34 },
       { header: 'collection', key: 'collection', width: 22 },
+      { header: 'chapter_outline', key: 'chapter_outline', width: 48 },
+      { header: 'full_story', key: 'full_story', width: 80 },
     ];
     ws.getRow(1).font = { bold: true };
     ws.getRow(1).alignment = { vertical: 'middle' };
@@ -648,6 +670,8 @@ async function handleExportXlsx() {
         categories: getCategoriesForExport(novel),
         tag: getTagsForExport(novel),
         collection: safeStr(novel.collection) || collection,
+        chapter_outline: getChapterOutlineText(novel),
+        full_story: getFullStoryText(i),
       });
 
       if (cover) {
@@ -1694,6 +1718,15 @@ function formatNovelTxt(novel, index) {
     });
   } else {
     txt += 'N/A\n';
+  }
+
+  const fullStory = getFullStoryText(index);
+  if (fullStory) {
+    txt += `\n${'-'.repeat(40)}\n`;
+    txt += `FULL STORY (BY CHAPTER)\n`;
+    txt += `${'-'.repeat(40)}\n\n`;
+    txt += fullStory;
+    txt += '\n\n';
   }
 
   txt += `\n${'='.repeat(60)}\n`;
