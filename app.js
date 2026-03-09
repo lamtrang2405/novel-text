@@ -16,7 +16,17 @@ const state = {
   reviewedNovels: new Set(), // indices of templates marked "passed manual review"
   isGenerating: false,
   speakingSegment: null, // { audioIndex, segmentIndex } - for stopping TTS
+  imageGenerationDisabled: false,
+  imageGenerationDisabledReason: '',
 };
+
+function canGenerateImages() {
+  // Gemini image generation requires a key. The "free image API" is a best-effort fallback.
+  // If the fallback is blocked (CORS / network), we disable it after the first failure.
+  if (state.imageGenerationDisabled) return false;
+  if (getAIProvider() === 'gemini' && getApiKey()) return true;
+  return true; // allow trying the free fallback once
+}
 
 // --- UI Styles (covers + chapters) ---
 function injectUiStyles() {
@@ -336,8 +346,12 @@ function loadExampleTemplates() {
   });
   attachEditSyncListeners(container);
   section.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  showToast('Example templates loaded. Generating thumbnails…', 'success');
-  generateCoversForAllTemplates();
+  if (canGenerateImages()) {
+    showToast('Example templates loaded. Generating thumbnails…', 'success');
+    generateCoversForAllTemplates();
+  } else {
+    showToast('Example templates loaded. Configure image generation to create thumbnails.', 'success');
+  }
 }
 
 // --- Small helpers ---
@@ -439,6 +453,10 @@ function pickCoverDataUrl(novelIndex, novel) {
 async function ensureThumbnailsForExport() {
   const novels = state.novels || [];
   if (!Array.isArray(novels) || !novels.length) return;
+  if (!canGenerateImages()) {
+    showToast('Image generation is not available; exporting without thumbnails.', 'info');
+    return;
+  }
   const missing = novels
     .map((n, i) => (typeof n?.cover === 'string' && n.cover.startsWith('data:image/')) ? -1 : i)
     .filter(i => i >= 0);
@@ -2538,6 +2556,9 @@ async function callGeminiImagen(prompt) {
 
 // --- Free image API fallback (no key required) ---
 async function callFreeImageAPI(prompt, novel) {
+  if (state.imageGenerationDisabled) {
+    throw new Error(state.imageGenerationDisabledReason || 'Image generation is disabled');
+  }
   const tone = novel?.narratorTone || '';
   const background = novel?.background || '';
   const styleHint = [tone, background].filter(Boolean).join('. ');
@@ -2545,11 +2566,20 @@ async function callFreeImageAPI(prompt, novel) {
     ? `Scene image, style: ${styleHint}. ${prompt}. Digital art, high quality, atmospheric.`
     : `Scene image: ${prompt}. Digital art, high quality, atmospheric.`;
   const url = 'https://t2i.mcpcore.xyz/api/free/generate';
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt: fullPrompt, model: 'turbo' }),
-  });
+  let response;
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: fullPrompt, model: 'turbo' }),
+    });
+  } catch (e) {
+    // On GitHub Pages this commonly fails due to CORS preflight rejection by the API host.
+    const msg = (e && (e.message || String(e))) || 'Failed to fetch';
+    state.imageGenerationDisabled = true;
+    state.imageGenerationDisabledReason = msg;
+    throw e;
+  }
   if (!response.ok) throw new Error(`Image API error: ${response.status}`);
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
