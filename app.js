@@ -21,11 +21,10 @@ const state = {
 };
 
 function canGenerateImages() {
-  // Gemini image generation requires a key.
-  // The "free image API" fallback is blocked by CORS on GitHub Pages (common),
-  // so we disable it there to avoid noisy console errors and failed exports.
-  if (state.imageGenerationDisabled) return false;
+  // Gemini image generation: always allow when provider is Gemini and key is set (Imagen).
   if (getAIProvider() === 'gemini' && getApiKey()) return true;
+  // Free API fallback is blocked by CORS on GitHub Pages; disable flag only affects non-Gemini users.
+  if (state.imageGenerationDisabled) return false;
   const isGithubPages = typeof location !== 'undefined' && /(^|\.)github\.io$/i.test(location.hostname || '');
   if (isGithubPages) return false;
   return true;
@@ -2565,7 +2564,7 @@ async function callGeminiImagen(prompt) {
   if (!apiKey) return null;
   const url = `https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-002:predict?key=${encodeURIComponent(apiKey)}`;
   const body = {
-    instances: [{ prompt: prompt }],
+    instances: [{ prompt: String(prompt).slice(0, 2048) }],
     parameters: { sampleCount: 1 }
   };
   const response = await fetch(url, {
@@ -2573,20 +2572,36 @@ async function callGeminiImagen(prompt) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
+  const rawText = await response.text();
   if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`Gemini Imagen error: ${response.status} ${err}`);
+    let errMsg = rawText;
+    try {
+      const errJson = JSON.parse(rawText);
+      errMsg = errJson.error?.message || errJson.message || errMsg;
+    } catch (_) {}
+    throw new Error(`Gemini Imagen: ${errMsg}`);
   }
-  const data = await response.json();
-  // Response: predictions[].bytesBase64Encoded or predictions[].image.bytesBase64Encoded
-  const pred = data.predictions && data.predictions[0];
+  let data;
+  try {
+    data = JSON.parse(rawText);
+  } catch (_) {
+    throw new Error('Invalid JSON in Imagen response');
+  }
+  if (data.error) {
+    const msg = data.error.message || data.error.code || 'Image generation failed';
+    throw new Error(String(msg));
+  }
+  // Response shapes: predictions[].bytesBase64Encoded, .image.bytesBase64Encoded, .image.imageBytes; or generated_images[].image.imageBytes; or structValue.fields
+  const pred = (data.predictions && data.predictions[0]) || (data.generated_images && data.generated_images[0]);
   if (!pred) throw new Error('No image in Gemini Imagen response');
-  let b64 = pred.bytesBase64Encoded || (pred.image && pred.image.bytesBase64Encoded);
-  if (typeof b64 !== 'string' && pred.structValue && pred.structValue.fields && pred.structValue.fields.bytesBase64Encoded) {
+  let b64 = pred.bytesBase64Encoded || (pred.image && (pred.image.bytesBase64Encoded || pred.image.imageBytes));
+  if (typeof b64 !== 'string' && pred.structValue?.fields?.bytesBase64Encoded) {
     const f = pred.structValue.fields.bytesBase64Encoded;
-    b64 = f.stringValue || f.string_value;
+    b64 = f.stringValue ?? f.string_value;
   }
-  if (!b64) throw new Error('No image bytes in Gemini Imagen response');
+  if (typeof b64 !== 'string' && pred.generatedImage?.image?.imageBytes)
+    b64 = pred.generatedImage.image.imageBytes;
+  if (!b64 || typeof b64 !== 'string') throw new Error('No image bytes in Gemini Imagen response');
   return `data:image/png;base64,${b64}`;
 }
 
@@ -2610,10 +2625,12 @@ async function callFreeImageAPI(prompt, novel) {
       body: JSON.stringify({ prompt: fullPrompt, model: 'turbo' }),
     });
   } catch (e) {
-    // On GitHub Pages this commonly fails due to CORS preflight rejection by the API host.
+    // On GitHub Pages this commonly fails due to CORS. Only disable free API for non-Gemini users.
     const msg = (e && (e.message || String(e))) || 'Failed to fetch';
-    state.imageGenerationDisabled = true;
-    state.imageGenerationDisabledReason = msg;
+    if (getAIProvider() !== 'gemini') {
+      state.imageGenerationDisabled = true;
+      state.imageGenerationDisabledReason = msg;
+    }
     throw e;
   }
   if (!response.ok) throw new Error(`Image API error: ${response.status}`);
@@ -2635,7 +2652,13 @@ async function callFreeImageAPI(prompt, novel) {
     }
   }
   if (errMsg) throw new Error(errMsg);
-  if (!imageUrl) throw new Error('No image URL in response');
+  if (!imageUrl) {
+    if (getAIProvider() !== 'gemini') {
+      state.imageGenerationDisabled = true;
+      state.imageGenerationDisabledReason = 'No image URL in response';
+    }
+    throw new Error('No image URL in response');
+  }
   const imgResp = await fetch(imageUrl);
   if (!imgResp.ok) throw new Error('Failed to fetch generated image');
   const blob = await imgResp.blob();
