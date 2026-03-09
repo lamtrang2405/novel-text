@@ -21,11 +21,14 @@ const state = {
 };
 
 function canGenerateImages() {
-  // Gemini image generation requires a key. The "free image API" is a best-effort fallback.
-  // If the fallback is blocked (CORS / network), we disable it after the first failure.
+  // Gemini image generation requires a key.
+  // The "free image API" fallback is blocked by CORS on GitHub Pages (common),
+  // so we disable it there to avoid noisy console errors and failed exports.
   if (state.imageGenerationDisabled) return false;
   if (getAIProvider() === 'gemini' && getApiKey()) return true;
-  return true; // allow trying the free fallback once
+  const isGithubPages = typeof location !== 'undefined' && /(^|\.)github\.io$/i.test(location.hostname || '');
+  if (isGithubPages) return false;
+  return true;
 }
 
 // --- UI Styles (covers + chapters) ---
