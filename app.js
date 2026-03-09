@@ -331,9 +331,23 @@ function stampCollectionAndCategoriesFromForm(novels) {
   });
 }
 
+function getExampleFullStory(index) {
+  const samples = [
+    '[CHAPTER 1]\nTitle: The Awakening\n\nElara felt the pain before she saw the attacker. It was a sharp, cold blade of fear—not her own. She turned. In the alley, a man in Order colours was advancing on a child. Without thinking, she reached out. The pain flooded into her, and with it, a flash of memory: the Order knight, the cover-up, the lie. When she opened her eyes, the knight was on his knees. The child had fled. Elara ran.\n[/CHAPTER 1]\n\n[CHAPTER 2]\nTitle: The Order\n\nThey recruited her the next week. "You have a gift," the commander said. "Help us find the rogue. Help us end this." She took the mission. Find Kael. Bring him in. But every time she touched someone\'s pain, she saw more of the truth—and less of the Order\'s version.\n[/CHAPTER 2]\n\n[CHAPTER 3]\nTitle: The Truth\n\nIn the ruins where the war had started, she finally faced Kael. "They didn\'t tell you," he said. "They never tell anyone." The memories she had absorbed from a dozen victims aligned. The Order had started the war. She had been hunting the wrong enemy. Elara made her choice.\n[/CHAPTER 3]',
+    '[CHAPTER 1]\nTitle: The Contract\n\nMaya signed the NDA and took the check. Julian Cross\'s Vermont estate was as cold as his reputation. "Finish the book," his agent said. "He gives you the outline; you make it sing." The outline was in code. The first page she decoded mentioned a real date, a real place—and a body.\n[/CHAPTER 1]\n\n[CHAPTER 2]\nTitle: The Manuscript\n\nCoded pages kept pointing to the same night: a party, a fall, a cover-up. She interviewed the staff. One of them had seen something. That night, someone left a note on her pillow: Stop asking. She didn\'t.\n[/CHAPTER 2]\n\n[CHAPTER 3]\nTitle: The Murder\n\nA body turned up in the same spot the manuscript described. The police asked questions. Julian finally talked. "I didn\'t write it as fiction," he said. "I wrote it as confession." To finish the book and stay alive, Maya had to piece together the story—and decide who to trust.\n[/CHAPTER 3]'
+  ];
+  return samples[index] || '';
+}
+
 function loadExampleTemplates() {
   state.novels = getExampleTemplates();
   stampCollectionAndCategoriesFromForm(state.novels);
+  // Pre-fill sample full stories so export shows chapter_outline and full_story columns with content
+  state.stories = {};
+  state.novels.forEach((_, index) => {
+    const sample = getExampleFullStory(index);
+    if (sample) state.stories[index] = sample;
+  });
   const section = document.getElementById('resultsSection');
   const countEl = document.getElementById('resultsCount');
   const container = document.getElementById('novelsContainer');
@@ -347,6 +361,20 @@ function loadExampleTemplates() {
     container.appendChild(card);
   });
   attachEditSyncListeners(container);
+  // Show full story in cards so the new columns are visible in UI and in export
+  state.novels.forEach((_, index) => {
+    const storyText = state.stories[index];
+    if (storyText) {
+      const storySection = document.getElementById(`storySection_${index}`);
+      const storyContent = document.getElementById(`storyContent_${index}`);
+      if (storySection && storyContent) {
+        renderStoryChapters(index, storyText);
+        storySection.style.display = 'block';
+      }
+      const storyBtn = document.getElementById(`storyBtn_${index}`);
+      if (storyBtn) storyBtn.innerHTML = '<span class="btn-text">✅ Story Generated</span>';
+    }
+  });
   section.scrollIntoView({ behavior: 'smooth', block: 'start' });
   if (canGenerateImages()) {
     showToast('Example templates loaded. Generating thumbnails…', 'success');
