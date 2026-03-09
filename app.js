@@ -333,8 +333,72 @@ function stampCollectionAndCategoriesFromForm(novels) {
 
 function getExampleFullStory(index) {
   const samples = [
-    '[CHAPTER 1]\nTitle: The Awakening\n\nElara felt the pain before she saw the attacker. It was a sharp, cold blade of fear—not her own. She turned. In the alley, a man in Order colours was advancing on a child. Without thinking, she reached out. The pain flooded into her, and with it, a flash of memory: the Order knight, the cover-up, the lie. When she opened her eyes, the knight was on his knees. The child had fled. Elara ran.\n[/CHAPTER 1]\n\n[CHAPTER 2]\nTitle: The Order\n\nThey recruited her the next week. "You have a gift," the commander said. "Help us find the rogue. Help us end this." She took the mission. Find Kael. Bring him in. But every time she touched someone\'s pain, she saw more of the truth—and less of the Order\'s version.\n[/CHAPTER 2]\n\n[CHAPTER 3]\nTitle: The Truth\n\nIn the ruins where the war had started, she finally faced Kael. "They didn\'t tell you," he said. "They never tell anyone." The memories she had absorbed from a dozen victims aligned. The Order had started the war. She had been hunting the wrong enemy. Elara made her choice.\n[/CHAPTER 3]',
-    '[CHAPTER 1]\nTitle: The Contract\n\nMaya signed the NDA and took the check. Julian Cross\'s Vermont estate was as cold as his reputation. "Finish the book," his agent said. "He gives you the outline; you make it sing." The outline was in code. The first page she decoded mentioned a real date, a real place—and a body.\n[/CHAPTER 1]\n\n[CHAPTER 2]\nTitle: The Manuscript\n\nCoded pages kept pointing to the same night: a party, a fall, a cover-up. She interviewed the staff. One of them had seen something. That night, someone left a note on her pillow: Stop asking. She didn\'t.\n[/CHAPTER 2]\n\n[CHAPTER 3]\nTitle: The Murder\n\nA body turned up in the same spot the manuscript described. The police asked questions. Julian finally talked. "I didn\'t write it as fiction," he said. "I wrote it as confession." To finish the book and stay alive, Maya had to piece together the story—and decide who to trust.\n[/CHAPTER 3]'
+    // Shadows of the Empathic Order — full chapter content
+    `[CHAPTER 1]
+Title: The Awakening
+
+Elara felt the pain before she saw the attacker. It was a sharp, cold blade of fear—not her own. She turned. In the alley, a man in Order colours was advancing on a child. Without thinking, she reached out. The pain flooded into her, and with it, a flash of memory: the Order knight, the cover-up, the lie. When she opened her eyes, the knight was on his knees. The child had fled. Elara ran.
+
+She did not stop until she reached the river. There she knelt, hands in the water, and let the borrowed pain bleed out into the current. It had been like this since she was twelve: other people's feelings found her. Fear, grief, rage. She could pull them in or push them back, but she could not make them stop coming. The Order called it a gift. She had learned to call it a curse.
+
+That night she dreamed of the knight again—not the alley, but years earlier. A room. A report. The words "acceptable losses" and a signature. When she woke, she knew the child had seen the same. Somewhere in the city, someone else now carried a piece of the truth. She did not know yet that the Order would come for her too.
+
+[/CHAPTER 1]
+
+[CHAPTER 2]
+Title: The Order
+
+They recruited her the next week. "You have a gift," the commander said. "Help us find the rogue. Help us end this." She took the mission. Find Kael. Bring him in. But every time she touched someone's pain, she saw more of the truth—and less of the Order's version.
+
+Kael had been one of them. A knight. A believer. Then he had stumbled on the same report she had seen in the alley-child's memory. He had asked questions. They had called him rogue. Now they wanted him dead, and they wanted her to do the finding. She walked the districts where the displaced lived, the ones who had lost everything in the war. In every mind she brushed, she found the same thread: the Order had not been the victim. The Order had been the cause.
+
+She sent her reports. She said nothing of what she had seen. At night she practiced holding the pain of others without letting it change her. She was not sure it was possible. By the time they gave her the location of Kael's last sighting, she had already decided she would hear him out before she decided whose side she was on.
+
+[/CHAPTER 2]
+
+[CHAPTER 3]
+Title: The Truth
+
+In the ruins where the war had started, she finally faced Kael. "They didn't tell you," he said. "They never tell anyone." The memories she had absorbed from a dozen victims aligned. The Order had started the war. She had been hunting the wrong enemy. Elara made her choice.
+
+She did not draw her blade. She stood between him and the squad that had followed her, and she showed them what she had seen—not in words, but in feeling. She pushed the truth into their minds the way she had once pulled pain from the child in the alley. One by one they felt it: the report, the signatures, the lie. Some of them dropped their weapons. One of them ran. The commander did not. He looked at her and said, "Then you are rogue too."
+
+She and Kael left the ruins before the Order could send reinforcements. They had no plan yet, only the certainty that the truth had to reach the rest of the city. "What do we do now?" Kael asked. Elara thought of the child, and the knight on his knees, and the river. "We find everyone who already knows," she said. "And we make sure they're not alone anymore."
+
+[/CHAPTER 3]`,
+    // Midnight at the Inkwell — full chapter content
+    `[CHAPTER 1]
+Title: The Contract
+
+Maya signed the NDA and took the check. Julian Cross's Vermont estate was as cold as his reputation. "Finish the book," his agent said. "He gives you the outline; you make it sing." The outline was in code. The first page she decoded mentioned a real date, a real place—and a body.
+
+She had thought the code was a quirk. Celebrity authors had quirks. But the more she worked through the cipher, the more the outline read like a confession. A party at the estate. A fall from the balcony. A cover-up that had lasted twenty years. She told herself it was research. That Julian wrote thrillers; of course his outlines were dark. She kept decoding. By the end of the week she had a timeline, names, and a sinking feeling that the book was not fiction.
+
+She met Julian only once that month. He was gaunt, quiet, and he would not look at her when she asked about the outline. "Just write it," he said. "Write it the way it happened." That night she went back to her cottage on the grounds and stared at the decoded pages. The way it happened. She had signed the NDA. She had taken the check. If she walked away now, she would never work again. If she stayed, she had to decide what to do with the truth.
+
+[/CHAPTER 1]
+
+[CHAPTER 2]
+Title: The Manuscript
+
+Coded pages kept pointing to the same night: a party, a fall, a cover-up. She interviewed the staff. One of them had seen something. That night, someone left a note on her pillow: Stop asking. She didn't.
+
+The note was typed. No fingerprints. She started locking her door and keeping the decoded manuscript in a bag she never left unattended. The staff had been at the estate for years; loyalty ran deep. But one of them—an older groundskeeper—had looked at her with something like pity when she asked about the balcony. "Some things are better left in the past," he said. She found him again the next day. He was gone. No forwarding address. No one would say where he had gone.
+
+She kept decoding. The manuscript described a woman who had come to the party uninvited. A confrontation. A push. The body had been found in the garden, not the balcony—the outline had been wrong about that, or someone had moved it. She cross-referenced dates. The party had been twenty-two years ago. Julian's first bestseller had come out a year later. The book had been about a writer who got away with murder. She went back to the main house and asked to see Julian again. His agent said he was not well. Maya said she had questions only he could answer. She was still waiting for the meeting when the body turned up in the garden.
+
+[/CHAPTER 2]
+
+[CHAPTER 3]
+Title: The Murder
+
+A body turned up in the same spot the manuscript described. The police asked questions. Julian finally talked. "I didn't write it as fiction," he said. "I wrote it as confession." To finish the book and stay alive, Maya had to piece together the story—and decide who to trust.
+
+The body was the groundskeeper. He had been dead for two days. The police treated Maya as a witness. She gave them the decoded manuscript and told them everything she had found. Julian was arrested. His agent was arrested. The story made the front page. Maya's name was in the byline—not as the ghostwriter, but as the one who had broken the case. The publisher still wanted the book. They wanted her to write it, under her own name this time. The truth, they said, would sell.
+
+She went back to Vermont once, after the trial. The estate was empty. She stood in the garden where the groundskeeper had been found and thought about the woman from the party, the one in the manuscript. She had never been identified. Maybe she had never existed. Maybe Julian had made her up to explain the body. Or maybe she was still out there, and the manuscript had been a message. Maya had decoded it. She had told the story. Some nights she wondered if that made her the next target—or the last one who could still choose what happened next. She sat down at her desk and started writing. Not the book they wanted. The one she needed to tell.
+
+[/CHAPTER 3]`
   ];
   return samples[index] || '';
 }
@@ -425,6 +489,34 @@ function getFullStoryText(index) {
   const fromDom = contentEl?.textContent?.trim();
   if (fromDom) return fromDom;
   return safeStr(state.stories[index]);
+}
+
+/** Max chapter columns to export (chapter_1_content .. chapter_N_content) */
+const MAX_EXPORT_CHAPTERS = 15;
+
+/** Parsed chapters with full content for export. Uses story with [CHAPTER N] markers when available for accurate split. */
+function getFullStoryChaptersForExport(index) {
+  const rawFromState = safeStr(state.stories[index]);
+  const fromDom = document.getElementById(`storyContent_${index}`)?.textContent?.trim();
+  const textToParse = rawFromState || fromDom || '';
+  let chapters = parseChaptersFromMarkers(textToParse);
+  if (!chapters.length && textToParse) {
+    chapters = [{ number: 1, title: '', content: textToParse }];
+  }
+  return chapters;
+}
+
+/** Header names for per-chapter content columns */
+function getExportChapterContentHeaders() {
+  return Array.from({ length: MAX_EXPORT_CHAPTERS }, (_, i) => `chapter_${i + 1}_content`);
+}
+
+/** Row values for per-chapter content (full text per chapter, no truncation) */
+function getExportChapterContentRow(index) {
+  const chapters = getFullStoryChaptersForExport(index);
+  const byNum = {};
+  chapters.forEach(ch => { byNum[ch.number] = safeStr(ch.content); });
+  return Array.from({ length: MAX_EXPORT_CHAPTERS }, (_, i) => byNum[i + 1] || '');
 }
 
 function csvEscape(v) {
@@ -528,13 +620,15 @@ async function handleExportCsv() {
     }
     await ensureThumbnailsForExport();
     const collection = getExportCollection();
-    const header = ['thumbnail', 'cover', 'title', 'author', 'cateogories', 'tag', 'collection', 'chapter_outline', 'full_story'];
+    const chapterHeaders = getExportChapterContentHeaders();
+    const header = ['thumbnail', 'cover', 'title', 'author', 'cateogories', 'tag', 'collection', 'chapter_outline', 'full_story', ...chapterHeaders];
     const lines = [header.map(csvEscape).join(',')];
     for (let i = 0; i < state.novels.length; i++) {
       const novel = state.novels[i] || {};
       // CSV can’t embed images. Use relative file paths so it works with the .zip package export.
       const thumbPath = `thumbnails/novel_${i + 1}.png`;
       const coverPath = `covers/novel_${i + 1}.png`;
+      const chapterContents = getExportChapterContentRow(i);
       const row = [
         thumbPath,
         coverPath,
@@ -545,6 +639,7 @@ async function handleExportCsv() {
         safeStr(novel.collection) || collection,
         getChapterOutlineText(novel),
         getFullStoryText(i),
+        ...chapterContents,
       ];
       lines.push(row.map(csvEscape).join(','));
     }
@@ -583,7 +678,8 @@ async function handleExportZipPackage() {
 
     // CSV that references the packaged file paths
     const collection = getExportCollection();
-    const header = ['thumbnail', 'cover', 'title', 'author', 'cateogories', 'tag', 'collection', 'chapter_outline', 'full_story'];
+    const chapterHeaders = getExportChapterContentHeaders();
+    const header = ['thumbnail', 'cover', 'title', 'author', 'cateogories', 'tag', 'collection', 'chapter_outline', 'full_story', ...chapterHeaders];
     const lines = [header.map(csvEscape).join(',')];
 
     const galleryCards = [];
@@ -603,6 +699,7 @@ async function handleExportZipPackage() {
 
       const thumbPath = `thumbnails/${thumbName}`;
       const coverPath = `covers/${coverName}`;
+      const chapterContents = getExportChapterContentRow(i);
       lines.push([
         thumbPath,
         coverPath,
@@ -613,6 +710,7 @@ async function handleExportZipPackage() {
         safeStr(novel.collection) || collection,
         getChapterOutlineText(novel),
         getFullStoryText(i),
+        ...chapterContents,
       ].map(csvEscape).join(','));
 
       galleryCards.push(`
@@ -670,6 +768,11 @@ async function handleExportXlsx() {
     const collection = getExportCollection();
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet('Novels');
+    const chapterCols = getExportChapterContentHeaders().map((h, i) => ({
+      header: h,
+      key: h,
+      width: 60,
+    }));
     ws.columns = [
       { header: 'thumbnail', key: 'thumbnail', width: 14 },
       { header: 'cover', key: 'cover', width: 28 },
@@ -680,6 +783,7 @@ async function handleExportXlsx() {
       { header: 'collection', key: 'collection', width: 22 },
       { header: 'chapter_outline', key: 'chapter_outline', width: 48 },
       { header: 'full_story', key: 'full_story', width: 80 },
+      ...chapterCols,
     ];
     ws.getRow(1).font = { bold: true };
     ws.getRow(1).alignment = { vertical: 'middle' };
@@ -689,6 +793,10 @@ async function handleExportXlsx() {
       const novel = state.novels[i] || {};
       const rowNumber = i + 2;
       const cover = pickCoverDataUrl(i, novel);
+      const chapterContents = getExportChapterContentRow(i);
+      const chapterKeys = getExportChapterContentHeaders();
+      const chapterObj = {};
+      chapterKeys.forEach((k, idx) => { chapterObj[k] = chapterContents[idx] || ''; });
       ws.addRow({
         thumbnail: cover ? '[thumbnail]' : '',
         cover: cover ? '[cover]' : '',
@@ -699,6 +807,7 @@ async function handleExportXlsx() {
         collection: safeStr(novel.collection) || collection,
         chapter_outline: getChapterOutlineText(novel),
         full_story: getFullStoryText(i),
+        ...chapterObj,
       });
 
       if (cover) {
