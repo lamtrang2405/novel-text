@@ -182,6 +182,7 @@ function initApp() {
   document.getElementById('loadExampleBtn')?.addEventListener('click', loadExampleTemplates);
   document.getElementById('testApiBtn')?.addEventListener('click', handleTestApi);
   document.getElementById('generateAllStoriesBtn')?.addEventListener('click', handleGenerateAllStories);
+  document.getElementById('fillMissingDataBtn')?.addEventListener('click', handleFillMissingData);
 
   // Download templates: dropdown (All as .txt | Export CSV | Export XLSX)
   const downloadTemplatesBtn = document.getElementById('downloadTemplatesBtn');
@@ -288,7 +289,9 @@ function getExampleTemplates() {
       genre: 'Dark Fantasy',
       category: 'Adult Fiction',
       collection: 'Passion Exclusives',
-      cateogories: 'Fantasy'
+      cateogories: 'Fantasy',
+      premium: 'yes',
+      show: 'yes'
     },
     {
       title: 'Midnight at the Inkwell',
@@ -312,7 +315,9 @@ function getExampleTemplates() {
       genre: 'Suspense Thriller',
       category: 'Adult Fiction',
       collection: 'Top Picks',
-      cateogories: 'Suspense Thriller'
+      cateogories: 'Suspense Thriller',
+      premium: 'yes',
+      show: 'yes'
     }
   ];
 }
@@ -328,6 +333,30 @@ function stampCollectionAndCategoriesFromForm(novels) {
       novel.cateogories = cateogories;
       if (!novel.genre) novel.genre = cateogories;
     }
+    if (!safeStr(novel.premium)) novel.premium = 'yes';
+    if (!safeStr(novel.show)) novel.show = 'yes';
+  });
+}
+
+/** Ensure every novel has data needed for export: synopsis, at least one chapter, premium, show, author, etc. */
+function normalizeNovelsForExport(novels) {
+  if (!Array.isArray(novels)) return;
+  novels.forEach(novel => {
+    if (!novel || typeof novel !== 'object') return;
+    const synopsis = safeStr(novel.synopsis);
+    if (!synopsis || synopsis === 'N/A') {
+      novel.synopsis = safeStr(novel.draftScript) || (novel.title ? `A story: ${novel.title}.` : 'No synopsis yet.');
+    }
+    if (!novel.chapters || !Array.isArray(novel.chapters) || novel.chapters.length === 0) {
+      novel.chapters = [
+        { chapterNumber: 1, title: 'Chapter 1', summary: novel.synopsis ? novel.synopsis.substring(0, 200) + (novel.synopsis.length > 200 ? '…' : '') : 'Opening.' }
+      ];
+    }
+    if (!safeStr(novel.authorName)) novel.authorName = safeStr(document.getElementById('authorName')?.value) || 'Unknown Author';
+    if (!safeStr(novel.premium)) novel.premium = 'yes';
+    if (!safeStr(novel.show)) novel.show = 'yes';
+    if (!safeStr(novel.collection)) novel.collection = safeStr(document.getElementById('collectionName')?.value);
+    if (!getCategoriesForExport(novel)) novel.cateogories = safeStr(document.getElementById('categoryName')?.value) || novel.genre || 'Fiction';
   });
 }
 
@@ -405,6 +434,7 @@ She went back to Vermont once, after the trial. The estate was empty. She stood 
 
 function loadExampleTemplates() {
   state.novels = getExampleTemplates();
+  normalizeNovelsForExport(state.novels);
   stampCollectionAndCategoriesFromForm(state.novels);
   // Pre-fill sample full stories so export shows chapter_outline and full_story columns with content
   state.stories = {};
@@ -1092,8 +1122,11 @@ Generate exactly ${formData.numNovels} novel templates. Each novel template MUST
 13. **category** — Reader/info category (e.g. "Young Adult", "Adult Fiction", "Children's", "Non-fiction", "Romance", "Fantasy")
 14. **collection** — "${formData.collectionName || ''}"
 15. **cateogories** — "${formData.cateogoriesName || ''}"
+16. **premium** — "yes" or "no" (whether the novel is premium content)
+17. **show** — "yes" or "no" (whether to show the novel in listings)
 
 Each novel should be DISTINCT — different plot, different character dynamics, different themes — while still being inspired by the creative brief.
+CRITICAL: Every novel MUST have a non-empty synopsis (3-5 sentences minimum) and MUST have 5-10 chapters with chapterNumber, title, and summary for each.
 
 ## OUTPUT FORMAT (CRITICAL)
 You MUST return valid JSON only. No markdown code blocks, no backticks, no explanation—just the raw JSON object.
@@ -1118,7 +1151,9 @@ You MUST return valid JSON only. No markdown code blocks, no backticks, no expla
       "genre": "...",
       "category": "...",
       "collection": "...",
-      "cateogories": "..."
+      "cateogories": "...",
+      "premium": "yes",
+      "show": "yes"
     }
   ]
 }`;
@@ -1260,7 +1295,7 @@ async function handleGenerate() {
     }
 
     state.novels = result.novels;
-    // Always stamp collection and categories from dropdown so export columns have data.
+    normalizeNovelsForExport(state.novels);
     stampCollectionAndCategoriesFromForm(state.novels);
     updateProgress(95, 'Generating thumbnails...');
     setTimeout(() => {
@@ -1516,6 +1551,14 @@ function createNovelCard(novel, index) {
         <div>
           <div class="novel-field-label">🌐 Language</div>
           <div class="novel-field-content editable" contenteditable="true" data-novel="${index}" data-field="writingLanguage">${escapeHtml(novel.writingLanguage || 'N/A')}</div>
+        </div>
+        <div>
+          <div class="novel-field-label">⭐ Premium</div>
+          <div class="novel-field-content editable" contenteditable="true" data-novel="${index}" data-field="premium">${escapeHtml(novel.premium || 'yes')}</div>
+        </div>
+        <div>
+          <div class="novel-field-label">👁️ Show</div>
+          <div class="novel-field-content editable" contenteditable="true" data-novel="${index}" data-field="show">${escapeHtml(novel.show || 'yes')}</div>
         </div>
       </div>
 
@@ -1956,6 +1999,86 @@ async function handleGenerateAllStories() {
   } else {
     showToast(`All ${total} stories generated!`, 'success');
   }
+}
+
+// --- Fill missing data (synopsis, chapter outlines) for export table ---
+function novelsNeedingMissingData() {
+  const indices = [];
+  (state.novels || []).forEach((novel, i) => {
+    const synopsis = safeStr(novel.synopsis);
+    const needsSynopsis = !synopsis || synopsis === 'N/A' || synopsis.length < 50 || synopsis.startsWith('A story:') && synopsis.length < 80;
+    const chapters = novel.chapters || [];
+    const needsChapters = chapters.length < 2 || (chapters.length === 1 && safeStr(chapters[0].summary).length < 50);
+    if (needsSynopsis || needsChapters) indices.push(i);
+  });
+  return indices;
+}
+
+async function generateMissingDataForNovel(index) {
+  const novel = state.novels[index];
+  if (!novel) return;
+  const prompt = `You are a novel template assistant. This novel needs complete template data for export.
+
+**Title:** ${novel.title || 'Untitled'}
+**Genre:** ${novel.genre || 'Fiction'}
+**Draft/Core idea:** ${(novel.draftScript || '').substring(0, 800)}
+${novel.background ? `**Setting:** ${novel.background.substring(0, 300)}` : ''}
+
+Return valid JSON only (no markdown, no backticks) with exactly these two fields:
+1. "synopsis" — A 3-5 sentence (or short paragraph) description of the full story, suitable for the book description.
+2. "chapters" — An array of 5-10 chapter outlines. Each item: { "chapterNumber": 1, "title": "Chapter title", "summary": "2-3 sentence summary" }
+
+Example format:
+{"synopsis": "Full story description here...", "chapters": [{"chapterNumber": 1, "title": "...", "summary": "..."}, ...]}`;
+
+  const result = await callGeminiAPI(prompt);
+  if (result.synopsis) novel.synopsis = result.synopsis;
+  if (result.chapters && Array.isArray(result.chapters) && result.chapters.length >= 2) {
+    novel.chapters = result.chapters.map(ch => ({
+      chapterNumber: ch.chapterNumber || 0,
+      title: ch.title || '',
+      summary: ch.summary || '',
+    })).filter(ch => ch.chapterNumber >= 1).sort((a, b) => a.chapterNumber - b.chapterNumber);
+  }
+  normalizeNovelsForExport([novel]);
+  const container = document.getElementById('novelsContainer');
+  const card = container?.querySelector(`.novel-card[data-index="${index}"]`);
+  if (card) {
+    const newCard = createNovelCard(novel, index);
+    card.replaceWith(newCard);
+    attachEditSyncListeners(container);
+    ensureCoverThumbInCard(index);
+  }
+}
+
+async function handleFillMissingData() {
+  const indices = novelsNeedingMissingData();
+  if (!indices.length) {
+    showToast('All templates already have synopsis and chapter outlines.', 'success');
+    return;
+  }
+  const keys = getApiKeys();
+  if (!keys.length) {
+    showToast('Add an API key in Settings to generate missing data.', 'error');
+    return;
+  }
+  const btn = document.getElementById('fillMissingDataBtn');
+  if (btn) { btn.classList.add('loading'); btn.disabled = true; }
+  showToast(`Filling missing data for ${indices.length} novel(s)...`, 'info');
+  let done = 0;
+  for (const i of indices) {
+    try {
+      await generateMissingDataForNovel(i);
+      done++;
+      showToast(`Filled ${done}/${indices.length}`, 'info');
+      await new Promise(r => setTimeout(r, 400));
+    } catch (e) {
+      console.warn('Fill missing data failed', i, e);
+      showToast(`Failed for novel ${i + 1}: ${e?.message || 'Unknown error'}`, 'error');
+    }
+  }
+  if (btn) { btn.classList.remove('loading'); btn.disabled = false; }
+  showToast(`Done. Filled missing data for ${done} novel(s).`, 'success');
 }
 
 // --- Generate Full Story ---
