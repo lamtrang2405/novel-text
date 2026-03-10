@@ -469,6 +469,8 @@ function loadExampleTemplates() {
       if (storyBtn) storyBtn.innerHTML = '<span class="btn-text">✅ Story Generated</span>';
     }
   });
+  const firstCard = container?.querySelector('.novel-card');
+  if (firstCard) firstCard.classList.add('expanded');
   section.scrollIntoView({ behavior: 'smooth', block: 'start' });
   if (canGenerateImages()) {
     showToast('Example templates loaded. Generating thumbnails…', 'success');
@@ -1421,6 +1423,10 @@ function renderResults(novels) {
     novels.forEach((_, i) => ensureCoverThumbInCard(i));
   } catch (_) {}
 
+  // Expand first card so template content (synopsis, chapter outline, etc.) is visible
+  const firstCard = container?.querySelector('.novel-card');
+  if (firstCard) firstCard.classList.add('expanded');
+
   // Scroll to results
   section.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
@@ -2045,9 +2051,21 @@ Example format:
   const card = container?.querySelector(`.novel-card[data-index="${index}"]`);
   if (card) {
     const newCard = createNovelCard(novel, index);
+    newCard.classList.add('expanded');
     card.replaceWith(newCard);
     attachEditSyncListeners(container);
     ensureCoverThumbInCard(index);
+    if (state.stories[index]) {
+      const storySection = document.getElementById(`storySection_${index}`);
+      const storyContent = document.getElementById(`storyContent_${index}`);
+      if (storySection && storyContent) {
+        renderStoryChapters(index, state.stories[index]);
+        storySection.style.display = 'block';
+      }
+      const storyBtn = document.getElementById(`storyBtn_${index}`);
+      if (storyBtn) storyBtn.innerHTML = '<span class="btn-text">✅ Story Generated</span>';
+    }
+    newCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 }
 
@@ -2178,6 +2196,7 @@ Rules:
     btn.classList.remove('loading');
 
     showToast(`Full story generated for "${novel.title}"!`, 'success');
+    storySection.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 
   } catch (error) {
     console.error('Story generation error:', error);
