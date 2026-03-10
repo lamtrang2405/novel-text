@@ -491,9 +491,6 @@ function getFullStoryText(index) {
   return safeStr(state.stories[index]);
 }
 
-/** Max chapter columns to export (chapter_1_content .. chapter_N_content) */
-const MAX_EXPORT_CHAPTERS = 15;
-
 /** Parsed chapters with full content for export. Uses story with [CHAPTER N] markers when available for accurate split. */
 function getFullStoryChaptersForExport(index) {
   const rawFromState = safeStr(state.stories[index]);
@@ -506,17 +503,54 @@ function getFullStoryChaptersForExport(index) {
   return chapters;
 }
 
-/** Header names for per-chapter content columns */
-function getExportChapterContentHeaders() {
-  return Array.from({ length: MAX_EXPORT_CHAPTERS }, (_, i) => `chapter_${i + 1}_content`);
-}
+/** Export column order (reformatted template: one row per chapter) */
+const EXPORT_HEADERS = ['thumbnail', 'title', 'description', 'premium', 'show', 'categories', 'collection', 'author', 'tags', 'chapter_outline', 'chapter_content'];
 
-/** Row values for per-chapter content (full text per chapter, no truncation) */
-function getExportChapterContentRow(index) {
-  const chapters = getFullStoryChaptersForExport(index);
-  const byNum = {};
-  chapters.forEach(ch => { byNum[ch.number] = safeStr(ch.content); });
-  return Array.from({ length: MAX_EXPORT_CHAPTERS }, (_, i) => byNum[i + 1] || '');
+/** Build one row per chapter for a novel. Each row has same novel metadata + one chapter_outline and chapter_content. */
+function buildExportRowsForNovel(novelIndex, novel, collection, thumbPath, coverPath) {
+  const templateChapters = novel?.chapters || [];
+  const storyChapters = getFullStoryChaptersForExport(novelIndex);
+  const outlineByNum = {};
+  templateChapters.forEach(ch => {
+    outlineByNum[ch.chapterNumber] = `Ch${ch.chapterNumber}: ${safeStr(ch.title)} — ${safeStr(ch.summary)}`;
+  });
+  const contentByNum = {};
+  storyChapters.forEach(ch => {
+    contentByNum[ch.number] = safeStr(ch.content);
+    if (!outlineByNum[ch.number])
+      outlineByNum[ch.number] = ch.title ? `Ch${ch.number}: ${ch.title}` : `Chapter ${ch.number}`;
+  });
+  const allNums = [...new Set([...Object.keys(outlineByNum).map(Number), ...Object.keys(contentByNum).map(Number)])].sort((a, b) => a - b);
+  const rows = [];
+  const description = safeStr(novel.synopsis);
+  const premium = safeStr(novel.premium);
+  const show = safeStr(novel.show);
+  const categories = getCategoriesForExport(novel);
+  const author = safeStr(novel.authorName || novel.author);
+  const tags = getTagsForExport(novel);
+  const coll = safeStr(novel.collection) || collection;
+  const title = safeStr(novel.title);
+
+  if (allNums.length === 0) {
+    rows.push([thumbPath, title, description, premium || 'yes', show || 'yes', categories, coll, author, tags, '', '']);
+    return rows;
+  }
+  allNums.forEach(num => {
+    rows.push([
+      thumbPath,
+      title,
+      description,
+      premium || 'yes',
+      show || 'yes',
+      categories,
+      coll,
+      author,
+      tags,
+      outlineByNum[num] || `Chapter ${num}`,
+      contentByNum[num] || '',
+    ]);
+  });
+  return rows;
 }
 
 function csvEscape(v) {
@@ -620,28 +654,14 @@ async function handleExportCsv() {
     }
     await ensureThumbnailsForExport();
     const collection = getExportCollection();
-    const chapterHeaders = getExportChapterContentHeaders();
-    const header = ['thumbnail', 'cover', 'title', 'author', 'cateogories', 'tag', 'collection', 'chapter_outline', 'full_story', ...chapterHeaders];
-    const lines = [header.map(csvEscape).join(',')];
+    const lines = [EXPORT_HEADERS.map(csvEscape).join(',')];
     for (let i = 0; i < state.novels.length; i++) {
       const novel = state.novels[i] || {};
       // CSV can’t embed images. Use relative file paths so it works with the .zip package export.
       const thumbPath = `thumbnails/novel_${i + 1}.png`;
       const coverPath = `covers/novel_${i + 1}.png`;
-      const chapterContents = getExportChapterContentRow(i);
-      const row = [
-        thumbPath,
-        coverPath,
-        safeStr(novel.title),
-        safeStr(novel.authorName || novel.author),
-        getCategoriesForExport(novel),
-        getTagsForExport(novel),
-        safeStr(novel.collection) || collection,
-        getChapterOutlineText(novel),
-        getFullStoryText(i),
-        ...chapterContents,
-      ];
-      lines.push(row.map(csvEscape).join(','));
+      const rows = buildExportRowsForNovel(i, novel, collection, thumbPath, coverPath);
+      rows.forEach(row => lines.push(row.map(csvEscape).join(',')));
     }
     const csv = lines.join('\r\n');
     downloadBlob(new Blob([csv], { type: 'text/csv;charset=utf-8' }), 'novels_export.csv');
@@ -676,11 +696,9 @@ async function handleExportZipPackage() {
     const thumbs = zip.folder('thumbnails');
     const covers = zip.folder('covers');
 
-    // CSV that references the packaged file paths
+    // CSV that references the packaged file paths (one row per chapter, same format as Export CSV)
     const collection = getExportCollection();
-    const chapterHeaders = getExportChapterContentHeaders();
-    const header = ['thumbnail', 'cover', 'title', 'author', 'cateogories', 'tag', 'collection', 'chapter_outline', 'full_story', ...chapterHeaders];
-    const lines = [header.map(csvEscape).join(',')];
+    const csvLines = [EXPORT_HEADERS.map(csvEscape).join(',')];
 
     const galleryCards = [];
 
@@ -699,19 +717,8 @@ async function handleExportZipPackage() {
 
       const thumbPath = `thumbnails/${thumbName}`;
       const coverPath = `covers/${coverName}`;
-      const chapterContents = getExportChapterContentRow(i);
-      lines.push([
-        thumbPath,
-        coverPath,
-        safeStr(novel.title),
-        safeStr(novel.authorName || novel.author),
-        getCategoriesForExport(novel),
-        getTagsForExport(novel),
-        safeStr(novel.collection) || collection,
-        getChapterOutlineText(novel),
-        getFullStoryText(i),
-        ...chapterContents,
-      ].map(csvEscape).join(','));
+      const rows = buildExportRowsForNovel(i, novel, collection, thumbPath, coverPath);
+      rows.forEach(row => csvLines.push(row.map(csvEscape).join(',')));
 
       galleryCards.push(`
         <a class="card" href="${coverPath}" target="_blank" rel="noopener">
@@ -721,7 +728,7 @@ async function handleExportZipPackage() {
       `);
     }
 
-    zip.file('templates.csv', lines.join('\r\n'));
+    zip.file('templates.csv', csvLines.join('\r\n'));
     zip.file('gallery.html', `<!doctype html>
 <html>
 <head>
@@ -768,67 +775,39 @@ async function handleExportXlsx() {
     const collection = getExportCollection();
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet('Novels');
-    const chapterCols = getExportChapterContentHeaders().map((h, i) => ({
+    ws.columns = EXPORT_HEADERS.map((h, idx) => ({
       header: h,
       key: h,
-      width: 60,
+      width: h === 'chapter_content' || h === 'description' ? 60 : h === 'chapter_outline' ? 48 : 20,
     }));
-    ws.columns = [
-      { header: 'thumbnail', key: 'thumbnail', width: 14 },
-      { header: 'cover', key: 'cover', width: 28 },
-      { header: 'title', key: 'title', width: 36 },
-      { header: 'author', key: 'author', width: 22 },
-      { header: 'cateogories', key: 'categories', width: 28 },
-      { header: 'tag', key: 'tag', width: 34 },
-      { header: 'collection', key: 'collection', width: 22 },
-      { header: 'chapter_outline', key: 'chapter_outline', width: 48 },
-      { header: 'full_story', key: 'full_story', width: 80 },
-      ...chapterCols,
-    ];
     ws.getRow(1).font = { bold: true };
     ws.getRow(1).alignment = { vertical: 'middle' };
     ws.getRow(1).height = 20;
 
+    let rowNumber = 2;
     for (let i = 0; i < state.novels.length; i++) {
       const novel = state.novels[i] || {};
-      const rowNumber = i + 2;
-      const cover = pickCoverDataUrl(i, novel);
-      const chapterContents = getExportChapterContentRow(i);
-      const chapterKeys = getExportChapterContentHeaders();
-      const chapterObj = {};
-      chapterKeys.forEach((k, idx) => { chapterObj[k] = chapterContents[idx] || ''; });
-      ws.addRow({
-        thumbnail: cover ? '[thumbnail]' : '',
-        cover: cover ? '[cover]' : '',
-        title: safeStr(novel.title),
-        author: safeStr(novel.authorName || novel.author),
-        categories: getCategoriesForExport(novel),
-        tag: getTagsForExport(novel),
-        collection: safeStr(novel.collection) || collection,
-        chapter_outline: getChapterOutlineText(novel),
-        full_story: getFullStoryText(i),
-        ...chapterObj,
+      const thumbPath = `thumbnails/novel_${i + 1}.png`;
+      const coverPath = `covers/novel_${i + 1}.png`;
+      const rows = buildExportRowsForNovel(i, novel, collection, thumbPath, coverPath);
+      rows.forEach(row => {
+        ws.addRow({
+          thumbnail: row[0],
+          title: row[1],
+          description: row[2],
+          premium: row[3],
+          show: row[4],
+          categories: row[5],
+          collection: row[6],
+          author: row[7],
+          tags: row[8],
+          chapter_outline: row[9],
+          chapter_content: row[10],
+        });
+        ws.getRow(rowNumber).alignment = { vertical: 'top', wrapText: true };
+        ws.getRow(rowNumber).height = 24;
+        rowNumber++;
       });
-
-      if (cover) {
-        const coverResized = await resizeDataUrl(cover, 360, 220, 'image/png');
-        const thumbResized = await resizeDataUrl(novel.thumbnail && novel.thumbnail.startsWith('data:image/') ? novel.thumbnail : cover, 110, 110, 'image/png');
-        const coverInfo = dataUrlToBase64Info(coverResized);
-        const thumbInfo = dataUrlToBase64Info(thumbResized);
-
-        if (thumbInfo) {
-          const imgId = wb.addImage({ base64: thumbInfo.base64, extension: thumbInfo.extension });
-          ws.addImage(imgId, { tl: { col: 0, row: rowNumber - 1 }, ext: { width: 96, height: 96 } });
-        }
-        if (coverInfo) {
-          const imgId = wb.addImage({ base64: coverInfo.base64, extension: coverInfo.extension });
-          ws.addImage(imgId, { tl: { col: 1, row: rowNumber - 1 }, ext: { width: 210, height: 120 } });
-        }
-        ws.getRow(rowNumber).height = 92;
-      } else {
-        ws.getRow(rowNumber).height = 20;
-      }
-      ws.getRow(rowNumber).alignment = { vertical: 'top', wrapText: true };
     }
 
     ws.views = [{ state: 'frozen', ySplit: 1 }];
