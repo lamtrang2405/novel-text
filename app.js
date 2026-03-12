@@ -393,9 +393,9 @@ function getExampleTemplates() {
       background: 'Neo-Victorian city where emotion-magic is regulated by the Order.',
       writingLanguage: 'English',
       chapters: [
-        { chapterNumber: 1, title: 'The Awakening', summary: 'Elara\'s power surfaces during an attack.' },
-        { chapterNumber: 2, title: 'The Order', summary: 'Recruited; first mission to find Kael.' },
-        { chapterNumber: 3, title: 'The Truth', summary: 'Discovers the Order\'s lie about the war.' }
+        { chapterNumber: 1, title: 'The Awakening', summary: 'Power awakens during attack.' },
+        { chapterNumber: 2, title: 'The Order', summary: 'Recruited to find Kael.' },
+        { chapterNumber: 3, title: 'The Truth', summary: 'Learns the Order lied.' }
       ],
       themes: ['trauma', 'identity', 'power'],
       genre: 'Dark Fantasy',
@@ -419,9 +419,9 @@ function getExampleTemplates() {
       background: 'New York publishing world; Vermont estate.',
       writingLanguage: 'English',
       chapters: [
-        { chapterNumber: 1, title: 'The Contract', summary: 'Maya takes the ghostwriting job.' },
-        { chapterNumber: 2, title: 'The Manuscript', summary: 'Coded pages hint at a real crime.' },
-        { chapterNumber: 3, title: 'The Murder', summary: 'A body turns up; the book and reality collide.' }
+        { chapterNumber: 1, title: 'The Contract', summary: 'Maya takes the job.' },
+        { chapterNumber: 2, title: 'The Manuscript', summary: 'Code hints at a crime.' },
+        { chapterNumber: 3, title: 'The Murder', summary: 'A body turns up.' }
       ],
       themes: ['identity', 'truth', 'art'],
       genre: 'Suspense Thriller',
