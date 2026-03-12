@@ -286,6 +286,13 @@ function initApp() {
     cateogoriesEl.addEventListener('change', (e) => localStorage.setItem('template_cateogories', e.target.value || ''));
   }
 
+  const authorEl = document.getElementById('authorName');
+  if (authorEl) {
+    const saved = localStorage.getItem('template_author') || '';
+    if (saved) authorEl.value = saved;
+    authorEl.addEventListener('input', (e) => localStorage.setItem('template_author', e.target.value || ''));
+  }
+
   updateApiStatusBadge();
 
   // Event listeners
@@ -447,7 +454,7 @@ function stampCollectionAndCategoriesFromForm(novels) {
       if (!novel.genre) novel.genre = cateogories;
     }
     if (formAuthor) novel.authorName = formAuthor;
-    else if (!safeStr(novel.authorName)) novel.authorName = 'Unknown Author';
+    else if (!safeStr(novel.authorName)) novel.authorName = 'Anonymous';
     if (!safeStr(novel.premium)) novel.premium = 'yes';
     if (!safeStr(novel.show)) novel.show = 'yes';
   });
@@ -467,7 +474,7 @@ function normalizeNovelsForExport(novels) {
         { chapterNumber: 1, title: 'Chapter 1', summary: novel.synopsis ? novel.synopsis.substring(0, 200) + (novel.synopsis.length > 200 ? '…' : '') : 'Opening.' }
       ];
     }
-    if (!safeStr(novel.authorName)) novel.authorName = safeStr(document.getElementById('authorName')?.value) || 'Unknown Author';
+    if (!safeStr(novel.authorName)) novel.authorName = safeStr(document.getElementById('authorName')?.value) || 'Anonymous';
     if (!safeStr(novel.premium)) novel.premium = 'yes';
     if (!safeStr(novel.show)) novel.show = 'yes';
     if (!safeStr(novel.collection)) novel.collection = safeStr(document.getElementById('collectionName')?.value);
@@ -823,6 +830,13 @@ function pickCoverDataUrl(novelIndex, novel) {
   if (!keys.length) return '';
   const first = scenes[keys[0]];
   return (typeof first === 'string' && first.startsWith('data:image/')) ? first : '';
+}
+
+function pickThumbnailDataUrl(novelIndex, novel) {
+  const maybe = novel?.thumbnail || novel?.thumb || novel?.cover;
+  if (typeof maybe === 'string' && maybe.startsWith('data:image/')) return maybe;
+  // Fall back to cover/scenes-derived image if present.
+  return pickCoverDataUrl(novelIndex, novel);
 }
 
 /** Before export: ensure every novel has cover + thumbnail so thumbnail/cover columns are filled. */
@@ -1276,7 +1290,7 @@ function collectFormData() {
     masterPrompt: document.getElementById('masterPrompt').value.trim(),
     draftScript: document.getElementById('draftScript').value.trim(),
     characterSystem: document.getElementById('characterSystem').value.trim(),
-    authorName: document.getElementById('authorName').value.trim() || 'Unknown Author',
+    authorName: document.getElementById('authorName').value.trim(),
     collectionName: document.getElementById('collectionName')?.value || '',
     cateogoriesName: document.getElementById('categoryName')?.value || '',
     releaseDate: document.getElementById('releaseDate').value || new Date().toISOString().split('T')[0],
@@ -1515,6 +1529,154 @@ async function callGeminiAPI(prompt) {
   throw new Error(lastErr || 'All Gemini models failed');
 }
 
+async function callGeminiAPIWithKey(prompt, apiKeyOverride = null, cfgOverride = null) {
+  const apiKey = apiKeyOverride || getApiKey();
+  if (!apiKey) throw new Error('No API key. Enter your Gemini key in the API Key(s) field.');
+  const models = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'];
+  let lastErr = null;
+  for (const model of models) {
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+      const response = await fetchWithTimeout(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: {
+            temperature: 0.9,
+            topP: 0.95,
+            topK: 40,
+            maxOutputTokens: 8192,
+            responseMimeType: 'application/json',
+            ...(cfgOverride || {}),
+          },
+        }),
+      }, 120000);
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        lastErr = errData?.error?.message || errData?.message || `API error: ${response.status}`;
+        if (lastErr.includes('404') || lastErr.includes('not found') || lastErr.includes('Invalid model')) continue;
+        throw new Error(lastErr);
+      }
+      const data = await response.json();
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!text) throw new Error('No content returned from Gemini API');
+      return JSON.parse(text);
+    } catch (e) {
+      lastErr = e?.message || lastErr;
+      if (e?.message?.includes('404') || e?.message?.includes('not found') || e?.message?.includes('Invalid model')) continue;
+      throw e;
+    }
+  }
+  throw new Error(lastErr || 'All Gemini models failed');
+}
+
+function buildSingleNovelPrompt(formData, novelIndex, total, avoidTitles = []) {
+  const uniqSalt = `${Date.now()}_${Math.random().toString(16).slice(2)}_${novelIndex + 1}`;
+  const asOne = { ...formData, numNovels: 1 };
+  let p = buildGeminiPrompt(asOne);
+
+  // Hard "lanes" to prevent parallel calls converging on the same idea.
+  const lanes = [
+    { genre: 'Urban Fantasy + Mystery', setting: 'modern city with hidden magic', twist: 'the "curse" is a bureaucratic spell system', vibe: 'noir, witty, fast' },
+    { genre: 'Sci‑Fi Thriller', setting: 'near-future space habitat', twist: 'the antagonist is a safety protocol', vibe: 'tense, cinematic' },
+    { genre: 'Romantic Drama', setting: 'small coastal town', twist: 'the love story is anchored by a legal secret', vibe: 'warm, bittersweet' },
+    { genre: 'Historical Adventure', setting: '18th-century trade route', twist: 'a map is a coded confession', vibe: 'swashbuckling, vivid' },
+    { genre: 'Horror', setting: 'isolated research facility', twist: 'the monster is an inherited memory', vibe: 'claustrophobic, eerie' },
+    { genre: 'Cozy Mystery', setting: 'bookshop / café community', twist: 'the clues are hidden in margins', vibe: 'charming, clever' },
+    { genre: 'Epic Fantasy', setting: 'frontier kingdom on the brink', twist: 'prophecy is a manufactured narrative', vibe: 'mythic, grand' },
+    { genre: 'Crime / Heist', setting: 'glamorous metropolis', twist: 'the heist is to steal a person’s identity record', vibe: 'slick, witty' },
+    { genre: 'YA Coming-of-Age', setting: 'boarding school / academy', twist: 'the “tests” are moral experiments', vibe: 'bright, heartfelt' },
+    { genre: 'Speculative Literary', setting: 'a town with one impossible rule', twist: 'breaking the rule rewrites relationships', vibe: 'poetic, thoughtful' },
+  ];
+  const lane = lanes[novelIndex % lanes.length];
+  const avoid = Array.isArray(avoidTitles) && avoidTitles.length
+    ? avoidTitles.map(t => `"${safeStr(t).slice(0, 80)}"`).filter(Boolean).slice(0, 25).join(', ')
+    : '';
+
+  p += `\n\n## UNIQUENESS & LANE (CRITICAL)\nThis request is for Novel ${novelIndex + 1} of ${total}.\n` +
+    `You MUST follow this lane:\n` +
+    `- Required genre lane: ${lane.genre}\n` +
+    `- Required setting: ${lane.setting}\n` +
+    `- Required core twist: ${lane.twist}\n` +
+    `- Required vibe: ${lane.vibe}\n` +
+    `Title MUST be unique and MUST clearly reflect this lane.\n` +
+    (avoid ? `Do NOT use any of these titles (duplicates): ${avoid}\n` : '') +
+    `Use this uniqueness seed (do not repeat it in output): ${uniqSalt}\n`;
+  return p;
+}
+
+async function generateNovelsParallel(formData) {
+  const total = Math.max(1, parseInt(formData?.numNovels) || 1);
+  const keys = getApiKeys();
+  if (!keys.length && getAIProvider() !== 'deepseek') {
+    throw new Error('No API key. Enter your Gemini key in the API Key(s) field.');
+  }
+  const concurrency = Math.min(4, total, Math.max(1, keys.length || 1));
+  const queue = Array.from({ length: total }, (_, i) => i);
+  const out = new Array(total);
+  let done = 0;
+
+  const worker = async (workerId) => {
+    while (queue.length) {
+      const i = queue.shift();
+      if (i == null) break;
+      const prompt = buildSingleNovelPrompt(formData, i, total);
+      const key = keys.length ? keys[workerId % keys.length] : null;
+      const cfg = { maxOutputTokens: 6000 };
+      const r = (getAIProvider() === 'deepseek')
+        ? await callDeepSeekAPI(prompt, true)
+        : await callGeminiAPIWithKey(prompt, key, cfg);
+
+      const novel = Array.isArray(r?.novels) ? r.novels[0] : (r?.novel || r?.data?.novel);
+      if (!novel || typeof novel !== 'object') throw new Error('Invalid novel JSON returned');
+      out[i] = novel;
+      done++;
+      try {
+        updateProgress(40 + Math.floor((done / total) * 45), `Generated ${done}/${total} novels...`);
+      } catch (_) {}
+      // Small jitter to reduce burst/rate-limit collisions.
+      await new Promise(res => setTimeout(res, 120 + Math.floor(Math.random() * 160)));
+    }
+  };
+
+  await Promise.all(Array.from({ length: concurrency }, (_, wid) => worker(wid)));
+
+  // Retry duplicate titles once with explicit "avoidTitles".
+  const normTitle = (t) => safeStr(t).trim().toLowerCase().replace(/\s+/g, ' ');
+  const seen = new Map();
+  const dupIndices = [];
+  out.forEach((n, idx) => {
+    const t = normTitle(n?.title);
+    if (!t) return;
+    if (!seen.has(t)) seen.set(t, idx);
+    else dupIndices.push(idx);
+  });
+  if (dupIndices.length) {
+    const avoidTitles = out.map(n => safeStr(n?.title)).filter(Boolean);
+    const retryQueue = dupIndices.slice();
+    const retryConcurrency = Math.min(3, retryQueue.length, Math.max(1, keys.length || 1));
+    const retryWorker = async (workerId) => {
+      while (retryQueue.length) {
+        const i = retryQueue.shift();
+        if (i == null) break;
+        const prompt = buildSingleNovelPrompt(formData, i, total, avoidTitles);
+        const key = keys.length ? keys[workerId % keys.length] : null;
+        const cfg = { maxOutputTokens: 6500, temperature: 1.0 };
+        const r = (getAIProvider() === 'deepseek')
+          ? await callDeepSeekAPI(prompt, true)
+          : await callGeminiAPIWithKey(prompt, key, cfg);
+        const novel = Array.isArray(r?.novels) ? r.novels[0] : (r?.novel || r?.data?.novel);
+        if (novel && typeof novel === 'object') out[i] = novel;
+        await new Promise(res => setTimeout(res, 180 + Math.floor(Math.random() * 220)));
+      }
+    };
+    await Promise.all(Array.from({ length: retryConcurrency }, (_, wid) => retryWorker(wid)));
+  }
+
+  return out.filter(Boolean);
+}
+
 // --- Generate Handler ---
 async function handleGenerate() {
   if (!validateForm()) return;
@@ -1532,18 +1694,13 @@ async function handleGenerate() {
     const formData = collectFormData();
     updateProgress(25, 'Building AI prompt...');
 
-    const prompt = buildGeminiPrompt(formData);
     const provider = getAIProvider() === 'deepseek' ? 'DeepSeek' : 'Gemini';
-    updateProgress(40, `Generating ${formData.numNovels} novel templates with ${provider}...`);
+    updateProgress(40, `Generating ${formData.numNovels} novel templates with ${provider} (parallel mode)...`);
 
-    const result = await callGeminiAPI(prompt);
+    const novels = await generateNovelsParallel(formData);
     updateProgress(85, 'Processing results...');
 
-    if (!result.novels || !Array.isArray(result.novels)) {
-      throw new Error('Invalid response structure from AI');
-    }
-
-    state.novels = result.novels;
+    state.novels = novels;
     normalizeNovelsForExport(state.novels);
     stampCollectionAndCategoriesFromForm(state.novels);
     addHistoryRun(formData, state.novels);
@@ -3105,47 +3262,46 @@ async function callGeminiTTS(text, novel, segmentRaw = null) {
 async function callGeminiImagen(prompt) {
   const apiKey = getApiKey();
   if (!apiKey) return null;
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-002:predict?key=${encodeURIComponent(apiKey)}`;
-  const body = {
-    instances: [{ prompt: String(prompt).slice(0, 2048) }],
-    parameters: { sampleCount: 1 }
-  };
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  const rawText = await response.text();
-  if (!response.ok) {
-    let errMsg = rawText;
+  const models = [
+    'gemini-2.5-flash-image-preview',
+    'gemini-2.0-flash-exp-image-generation',
+    'gemini-1.5-pro', // last resort: may not support IMAGE output
+  ];
+  let lastErr = null;
+  for (const model of models) {
     try {
-      const errJson = JSON.parse(rawText);
-      errMsg = errJson.error?.message || errJson.message || errMsg;
-    } catch (_) {}
-    throw new Error(`Gemini Imagen: ${errMsg}`);
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
+      const response = await fetchWithTimeout(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: String(prompt).slice(0, 4096) }] }],
+          generationConfig: {
+            responseModalities: ['IMAGE'],
+          },
+        }),
+      }, 120000);
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        const msg = err?.error?.message || err?.message || `HTTP ${response.status}`;
+        lastErr = msg;
+        if (msg.includes('404') || msg.includes('not found') || msg.includes('Invalid model')) continue;
+        throw new Error(msg);
+      }
+      const data = await response.json();
+      const parts = data?.candidates?.[0]?.content?.parts || [];
+      const inline = parts.find(p => p?.inlineData?.data) || parts.find(p => p?.inline_data?.data);
+      const blob = inline?.inlineData || inline?.inline_data;
+      const b64 = blob?.data;
+      const mime = blob?.mimeType || blob?.mime_type || 'image/png';
+      if (!b64) throw new Error('No image returned');
+      return `data:${mime};base64,${b64}`;
+    } catch (e) {
+      lastErr = e?.message || String(e);
+      continue;
+    }
   }
-  let data;
-  try {
-    data = JSON.parse(rawText);
-  } catch (_) {
-    throw new Error('Invalid JSON in Imagen response');
-  }
-  if (data.error) {
-    const msg = data.error.message || data.error.code || 'Image generation failed';
-    throw new Error(String(msg));
-  }
-  // Response shapes: predictions[].bytesBase64Encoded, .image.bytesBase64Encoded, .image.imageBytes; or generated_images[].image.imageBytes; or structValue.fields
-  const pred = (data.predictions && data.predictions[0]) || (data.generated_images && data.generated_images[0]);
-  if (!pred) throw new Error('No image in Gemini Imagen response');
-  let b64 = pred.bytesBase64Encoded || (pred.image && (pred.image.bytesBase64Encoded || pred.image.imageBytes));
-  if (typeof b64 !== 'string' && pred.structValue?.fields?.bytesBase64Encoded) {
-    const f = pred.structValue.fields.bytesBase64Encoded;
-    b64 = f.stringValue ?? f.string_value;
-  }
-  if (typeof b64 !== 'string' && pred.generatedImage?.image?.imageBytes)
-    b64 = pred.generatedImage.image.imageBytes;
-  if (!b64 || typeof b64 !== 'string') throw new Error('No image bytes in Gemini Imagen response');
-  return `data:image/png;base64,${b64}`;
+  throw new Error(lastErr || 'Gemini image generation failed');
 }
 
 // --- Free image API fallback (no key required) ---
