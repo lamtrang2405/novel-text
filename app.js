@@ -1160,55 +1160,95 @@ async function fetchWithTimeout(url, options, ms = 120000) {
   }
 }
 
+function extractFirstJsonValue(text) {
+  const s = String(text || '');
+  const fenced = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const input = (fenced ? fenced[1] : s).trim();
+  const o = input.indexOf('{');
+  const a = input.indexOf('[');
+  const startIdx = (o === -1) ? a : (a === -1 ? o : Math.min(o, a));
+  if (startIdx < 0) return '';
+  const openChar = input[startIdx];
+  const closeChar = openChar === '{' ? '}' : ']';
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = startIdx; i < input.length; i++) {
+    const ch = input[i];
+    if (inStr) {
+      if (esc) { esc = false; continue; }
+      if (ch === '\\') { esc = true; continue; }
+      if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') { inStr = true; continue; }
+    if (ch === openChar) depth++;
+    if (ch === closeChar) {
+      depth--;
+      if (depth === 0) return input.slice(startIdx, i + 1).trim();
+    }
+  }
+  return input.slice(startIdx).trim();
+}
+
 // --- Call DeepSeek API (OpenAI-compatible) ---
 async function callDeepSeekAPI(prompt, expectJson = false) {
   const apiKey = getApiKey();
   if (!apiKey) throw new Error('No API key. Enter your DeepSeek key in the API Key(s) field.');
   const url = 'https://api.deepseek.com/v1/chat/completions';
-  const messages = [];
-  if (expectJson) {
-    messages.push({
-      role: 'system',
-      content: 'You are a helpful assistant. You must respond with valid JSON only. No markdown, no code fences, no extra text—just raw JSON.',
-    });
-  }
-  messages.push({ role: 'user', content: prompt });
-  const body = {
-    model: 'deepseek-chat',
-    messages,
-    temperature: expectJson ? 0.7 : 0.85,
-    max_tokens: 8192,
+  const callOnce = async (messages, bodyExtra = {}) => {
+    const body = {
+      model: 'deepseek-chat',
+      messages,
+      temperature: expectJson ? 0.2 : 0.85,
+      max_tokens: 8192,
+      ...bodyExtra,
+    };
+    const response = await fetchWithTimeout(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(body),
+    }, 120000);
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err?.error?.message || err?.message || `DeepSeek API error: ${response.status}`);
+    }
+    const data = await response.json();
+    return data.choices?.[0]?.message?.content?.trim() || '';
   };
-  if (expectJson) body.response_format = { type: 'json_object' };
-  const response = await fetchWithTimeout(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify(body),
-  }, 120000);
-  if (!response.ok) {
-    const err = await response.json().catch(() => ({}));
-    throw new Error(err?.error?.message || err?.message || `DeepSeek API error: ${response.status}`);
-  }
-  const data = await response.json();
-  let text = data.choices?.[0]?.message?.content?.trim();
+
+  const baseSystem = expectJson
+    ? 'Return ONLY valid JSON. No markdown, no code fences, no trailing commas, no comments, no extra text. Use double quotes for keys/strings.'
+    : '';
+
+  const messages1 = [];
+  if (baseSystem) messages1.push({ role: 'system', content: baseSystem });
+  messages1.push({ role: 'user', content: prompt });
+
+  let text = await callOnce(messages1, expectJson ? { response_format: { type: 'json_object' } } : {});
   if (!text) throw new Error('No content returned from DeepSeek');
-  if (expectJson) {
-    const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-    if (jsonMatch) text = jsonMatch[1].trim();
-    else {
-      const objMatch = text.match(/\{[\s\S]*\}/);
-      if (objMatch) text = objMatch[0];
-    }
+  if (!expectJson) return text;
+
+  const candidate = extractFirstJsonValue(text);
+  try {
+    return JSON.parse(candidate || text);
+  } catch (e) {
+    const messages2 = [
+      { role: 'system', content: baseSystem },
+      { role: 'user', content: 'Fix the following into VALID JSON ONLY. Output ONLY the JSON object, nothing else.' },
+      { role: 'user', content: text.slice(0, 60000) },
+    ];
+    const repaired = await callOnce(messages2, { response_format: { type: 'json_object' } });
+    const cand2 = extractFirstJsonValue(repaired);
     try {
-      return JSON.parse(text);
-    } catch (e) {
-      throw new Error('Invalid JSON from DeepSeek. Try again.');
+      return JSON.parse(cand2 || repaired);
+    } catch (_) {
+      throw new Error('Invalid JSON from DeepSeek. Please click Generate again.');
     }
   }
-  return text;
 }
 
 // --- Validation ---
