@@ -96,6 +96,105 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 });
 
+const HISTORY_KEY = 'novel_generation_history_v1';
+const HISTORY_MAX = 30;
+
+function loadHistoryRuns() {
+  try {
+    const raw = localStorage.getItem(HISTORY_KEY);
+    const arr = raw ? JSON.parse(raw) : [];
+    return Array.isArray(arr) ? arr : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function saveHistoryRuns(runs) {
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify((runs || []).slice(0, HISTORY_MAX)));
+  } catch (_) {}
+}
+
+function addHistoryRun(formData, novels) {
+  if (!Array.isArray(novels) || !novels.length) return;
+  const now = new Date();
+  const run = {
+    id: `${now.getTime()}_${Math.random().toString(16).slice(2)}`,
+    createdAt: now.toISOString(),
+    provider: getAIProvider() || 'gemini',
+    numNovels: novels.length,
+    masterPrompt: safeStr(formData?.masterPrompt).slice(0, 220),
+    novels,
+  };
+  const runs = loadHistoryRuns();
+  runs.unshift(run);
+  saveHistoryRuns(runs);
+}
+
+function formatHistoryRunTitle(run) {
+  const dt = run?.createdAt ? new Date(run.createdAt) : null;
+  const when = dt && !isNaN(dt.getTime()) ? dt.toLocaleString() : 'Unknown time';
+  const provider = safeStr(run?.provider) || 'AI';
+  const count = run?.numNovels || (Array.isArray(run?.novels) ? run.novels.length : 0);
+  const brief = safeStr(run?.masterPrompt) || 'No prompt';
+  return `${when} • ${provider} • ${count} novel(s) — ${brief}`;
+}
+
+function openHistory() {
+  const modal = document.getElementById('historyModal');
+  if (!modal) return;
+  modal.style.display = 'flex';
+  renderHistoryList();
+}
+
+function closeHistory() {
+  const modal = document.getElementById('historyModal');
+  if (!modal) return;
+  modal.style.display = 'none';
+}
+
+function renderHistoryList() {
+  const list = document.getElementById('historyList');
+  if (!list) return;
+  const runs = loadHistoryRuns();
+  if (!runs.length) {
+    list.innerHTML = `<div class="form-hint">No saved runs yet. Generate templates to create history.</div>`;
+    return;
+  }
+  list.innerHTML = runs.map(r => `
+    <div style="border:1px solid rgba(255,255,255,0.12); border-radius: 12px; padding: 10px 12px; margin: 10px 0; background: rgba(255,255,255,0.03);">
+      <div style="font-weight:700; margin-bottom:8px; line-height:1.35;">${escapeHtml(formatHistoryRunTitle(r))}</div>
+      <div style="display:flex; gap:10px; flex-wrap:wrap;">
+        <button type="button" class="btn btn-primary btn-sm" data-history-load="${escapeHtml(r.id)}">Load</button>
+        <button type="button" class="btn btn-secondary btn-sm" data-history-delete="${escapeHtml(r.id)}">Delete</button>
+      </div>
+    </div>
+  `).join('');
+
+  list.querySelectorAll('[data-history-load]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id = btn.getAttribute('data-history-load');
+      const run = loadHistoryRuns().find(x => x.id === id);
+      if (!run || !Array.isArray(run.novels)) return;
+      state.novels = run.novels;
+      normalizeNovelsForExport(state.novels);
+      stampCollectionAndCategoriesFromForm(state.novels);
+      renderResults(state.novels);
+      showToast('Loaded history run into results.', 'success');
+      closeHistory();
+    });
+  });
+  list.querySelectorAll('[data-history-delete]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id = btn.getAttribute('data-history-delete');
+      const runs2 = loadHistoryRuns().filter(x => x.id !== id);
+      saveHistoryRuns(runs2);
+      renderHistoryList();
+      showToast('Deleted history run.', 'info');
+    });
+  });
+}
+
 function initApp() {
   injectUiStyles();
 
@@ -143,6 +242,19 @@ function initApp() {
   document.getElementById('saveSettingsBtn')?.addEventListener('click', () => { saveSettings(); closeSettings(); });
   document.getElementById('settingsModal')?.addEventListener('click', (e) => {
     if (e.target.id === 'settingsModal') closeSettings();
+  });
+
+  // History modal
+  document.getElementById('openHistoryBtn')?.addEventListener('click', () => openHistory());
+  document.getElementById('closeHistoryBtn')?.addEventListener('click', () => closeHistory());
+  document.getElementById('closeHistoryBtn2')?.addEventListener('click', () => closeHistory());
+  document.getElementById('clearHistoryBtn')?.addEventListener('click', () => {
+    saveHistoryRuns([]);
+    renderHistoryList();
+    showToast('History cleared.', 'info');
+  });
+  document.getElementById('historyModal')?.addEventListener('click', (e) => {
+    if (e.target.id === 'historyModal') closeHistory();
   });
 
   document.getElementById('aiProvider')?.addEventListener('change', (e) => {
@@ -361,6 +473,8 @@ function normalizeNovelsForExport(novels) {
     if (!safeStr(novel.collection)) novel.collection = safeStr(document.getElementById('collectionName')?.value);
     if (!getCategoriesForExport(novel)) novel.cateogories = safeStr(document.getElementById('categoryName')?.value) || novel.genre || 'Fiction';
     if (!safeStr(novel.thumbnailPrompt)) novel.thumbnailPrompt = buildThumbnailPromptFromNovel(novel);
+    if (Array.isArray(novel.themes)) novel.themes = normalizeTagList(novel.themes);
+    if (Array.isArray(novel.tags)) novel.tags = normalizeTagList(novel.tags);
   });
 }
 
@@ -492,6 +606,25 @@ function safeStr(v) {
   return String(v).trim();
 }
 
+function limitWords(s, maxWords) {
+  const words = safeStr(s).split(/\s+/).filter(Boolean);
+  return words.slice(0, Math.max(1, maxWords)).join(' ');
+}
+
+function normalizeTagList(list) {
+  const out = (Array.isArray(list) ? list : [])
+    .map(t => limitWords(t, 2))
+    .map(t => t.replace(/[|—–-]+/g, ' ').replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+  const seen = new Set();
+  return out.filter(t => {
+    const k = t.toLowerCase();
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
+
 function getExportCollection() {
   return safeStr(document.getElementById('collectionName')?.value);
 }
@@ -506,9 +639,10 @@ function getCategoriesForExport(novel) {
 }
 
 function getTagsForExport(novel) {
-  if (Array.isArray(novel?.themes) && novel.themes.length) return novel.themes.map(safeStr).filter(Boolean).join(', ');
-  if (Array.isArray(novel?.tags) && novel.tags.length) return novel.tags.map(safeStr).filter(Boolean).join(', ');
-  return safeStr(novel?.tag) || '';
+  if (Array.isArray(novel?.themes) && novel.themes.length) return normalizeTagList(novel.themes).join(', ');
+  if (Array.isArray(novel?.tags) && novel.tags.length) return normalizeTagList(novel.tags).join(', ');
+  const single = safeStr(novel?.tag);
+  return single ? normalizeTagList([single]).join(', ') : '';
 }
 
 /** Chapter outline as plain text (for export columns): "Ch1: Title — Summary\nCh2: ..." */
@@ -679,6 +813,7 @@ async function ensureThumbnailsForExport() {
       await generateCoverForNovel(i);
     } catch (e) {
       console.warn('Thumbnail generation failed for novel', i, e);
+      showToast(`Thumbnail generation failed for novel ${i + 1}: ${e?.message || 'Unknown error'}`, 'error');
     }
     await new Promise(r => setTimeout(r, 200));
   }
@@ -1339,6 +1474,7 @@ async function handleGenerate() {
     state.novels = result.novels;
     normalizeNovelsForExport(state.novels);
     stampCollectionAndCategoriesFromForm(state.novels);
+    addHistoryRun(formData, state.novels);
     updateProgress(95, 'Generating thumbnails...');
     setTimeout(() => {
       showProgress(false);
@@ -1430,6 +1566,7 @@ async function generateCoversForAllTemplates() {
         showToast(`Cover images: ${done}/${indices.length}`, 'info');
       } catch (e) {
         console.warn('Cover generation failed', i, e);
+        showToast(`Cover generation failed for novel ${i + 1}: ${e?.message || 'Unknown error'}`, 'error');
       }
       await new Promise(r => setTimeout(r, 250));
     }

@@ -7,7 +7,7 @@
   <meta name="description"
     content="AI Novel Template Generator — Create multiple novel outlines from a single creative prompt using Google Gemini AI.">
   <title>AI Novel Template Generator</title>
-  <link rel="stylesheet" href="style.css?v=22">
+  <link rel="stylesheet" href="style.css?v=23">
   <link rel="icon"
     href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📚</text></svg>">
 </head>
@@ -24,8 +24,29 @@
         Gemini AI</p>
       <a href="https://github.com/lamtrang2405/novel-text/blob/main/TUTORIAL.md" target="_blank" rel="noopener" class="tutorial-link">📖 How to use</a>
       <button type="button" class="btn btn-secondary btn-sm" id="loadExampleBtn" title="Load sample templates to try export without generating">📄 Load example</button>
+      <button type="button" class="btn btn-secondary btn-sm" id="openHistoryBtn" title="View past generated results saved in this browser">🕘 History</button>
       <button type="button" class="btn-icon-header" id="openSettingsBtn" title="Settings">⚙️</button>
     </header>
+
+    <!-- ======== HISTORY MODAL ======== -->
+    <div class="settings-modal" id="historyModal" style="display:none">
+      <div class="settings-modal-content">
+        <div class="settings-header">
+          <h2>🕘 Generated History</h2>
+          <button type="button" class="btn-close" id="closeHistoryBtn">✕</button>
+        </div>
+        <div class="settings-body">
+          <div class="settings-section">
+            <div class="form-hint">Saved locally in your browser (localStorage). Use “Load” to restore previous generated templates.</div>
+            <div id="historyList" style="margin-top:12px"></div>
+          </div>
+        </div>
+        <div class="settings-footer" style="display:flex; gap:10px; justify-content:space-between; align-items:center;">
+          <button type="button" class="btn btn-secondary" id="clearHistoryBtn" title="Delete all saved history">Clear all</button>
+          <button type="button" class="btn btn-primary" id="closeHistoryBtn2">Close</button>
+        </div>
+      </div>
+    </div>
 
     <!-- ======== SETTINGS MODAL ======== -->
     <div class="settings-modal" id="settingsModal">
@@ -330,7 +351,7 @@
 
   <script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
-  <script src="app.js?v=22"></script>
+  <script src="app.js?v=23"></script>
 </body>
 
 </html>
