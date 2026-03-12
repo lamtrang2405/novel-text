@@ -724,7 +724,7 @@ function buildExportRowsForNovel(novelIndex, novel, collection, thumbPath, cover
   });
   const allNums = [...new Set([...Object.keys(outlineByNum).map(Number), ...Object.keys(contentByNum).map(Number)])].sort((a, b) => a - b);
   const rows = [];
-  const description = safeStr(novel.synopsis);
+  const description = clampText(safeStr(novel.synopsis), 100);
   const premium = safeStr(novel.premium);
   const show = safeStr(novel.show);
   const categories = getCategoriesForExport(novel);
@@ -2089,7 +2089,7 @@ function formatNovelTxt(novel, index) {
   txt += `${'='.repeat(60)}\n\n`;
 
   txt += `TITLE: ${novel.title || 'Untitled'}\n`;
-  txt += `DESCRIPTION: ${novel.synopsis || 'N/A'}\n`;
+  txt += `DESCRIPTION: ${clampText(novel.synopsis || 'N/A', 100)}\n`;
   txt += `GENRE: ${novel.genre || 'N/A'}\n`;
   txt += `AUTHOR: ${novel.authorName || 'N/A'}\n`;
   txt += `RELEASE DATE: ${novel.releaseDate || 'N/A'}\n`;
