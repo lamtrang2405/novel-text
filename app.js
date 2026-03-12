@@ -475,6 +475,19 @@ function normalizeNovelsForExport(novels) {
     if (!safeStr(novel.thumbnailPrompt)) novel.thumbnailPrompt = buildThumbnailPromptFromNovel(novel);
     if (Array.isArray(novel.themes)) novel.themes = normalizeTagList(novel.themes);
     if (Array.isArray(novel.tags)) novel.tags = normalizeTagList(novel.tags);
+
+    // Chapter outline: limit to 100 chars per chapter line (title + " — " + summary)
+    if (Array.isArray(novel.chapters)) {
+      novel.chapters = novel.chapters.map(ch => {
+        const c = ch && typeof ch === 'object' ? ch : {};
+        const limited = clampChapterLine(c.title, c.summary, 100);
+        return {
+          ...c,
+          title: limited.title || safeStr(c.title),
+          summary: limited.summary || '',
+        };
+      });
+    }
   });
 }
 
@@ -604,6 +617,25 @@ function safeStr(v) {
   if (Array.isArray(v)) return v.map(safeStr).filter(Boolean).join(', ');
   if (typeof v === 'object') return '';
   return String(v).trim();
+}
+
+function clampText(s, maxChars) {
+  const str = safeStr(s);
+  if (!maxChars || maxChars < 1) return str;
+  if (str.length <= maxChars) return str;
+  return str.slice(0, Math.max(0, maxChars - 1)).trimEnd() + '…';
+}
+
+function clampChapterLine(title, summary, maxChars = 100) {
+  const t = safeStr(title);
+  const s = safeStr(summary);
+  if (!t && !s) return { title: '', summary: '' };
+  if (!s) return { title: clampText(t, maxChars), summary: '' };
+  const sep = ' — ';
+  const base = t ? (t + sep) : '';
+  const remaining = Math.max(0, maxChars - base.length);
+  if (remaining <= 0) return { title: clampText(t, maxChars), summary: '' };
+  return { title: t, summary: clampText(s, remaining) };
 }
 
 function limitWords(s, maxWords) {
@@ -1264,7 +1296,7 @@ Generate exactly ${formData.numNovels} novel templates. Each novel template MUST
 7. **narratorTone** — Description of the narrative voice, POV, and tone
 8. **background** — The world/setting description and backdrop of the story
 9. **writingLanguage** — "${formData.writingLanguage}"
-10. **chapters** — An array of 5-10 chapter outlines, each with: chapterNumber, title, summary (2-3 sentences)
+10. **chapters** — An array of 5-10 chapter outlines, each with: chapterNumber, title, summary (SHORT). CRITICAL: For each chapter, the combined string "${'title'} — ${'summary'}" must be <= 100 characters.
 11. **themes** — Array of core themes explored in the novel
 12. **genre** — Primary and secondary genres
 13. **category** — Reader/info category (e.g. "Young Adult", "Adult Fiction", "Children's", "Non-fiction", "Romance", "Fantasy")
@@ -2009,6 +2041,7 @@ function formatNovelTxt(novel, index) {
   txt += `${'='.repeat(60)}\n\n`;
 
   txt += `TITLE: ${novel.title || 'Untitled'}\n`;
+  txt += `DESCRIPTION: ${novel.synopsis || 'N/A'}\n`;
   txt += `GENRE: ${novel.genre || 'N/A'}\n`;
   txt += `AUTHOR: ${novel.authorName || 'N/A'}\n`;
   txt += `RELEASE DATE: ${novel.releaseDate || 'N/A'}\n`;
@@ -2062,8 +2095,9 @@ function formatNovelTxt(novel, index) {
   txt += `${'-'.repeat(40)}\n`;
   if (novel.chapters && novel.chapters.length) {
     novel.chapters.forEach(ch => {
-      txt += `\n  Chapter ${ch.chapterNumber}: ${ch.title}\n`;
-      txt += `  ${ch.summary}\n`;
+      const limited = clampChapterLine(ch.title, ch.summary, 100);
+      txt += `\n  Chapter ${ch.chapterNumber}: ${limited.title || ch.title || ''}\n`;
+      if (safeStr(limited.summary)) txt += `  ${limited.summary}\n`;
     });
   } else {
     txt += 'N/A\n';
@@ -2217,7 +2251,7 @@ ${novel.background ? `**Setting:** ${novel.background.substring(0, 300)}` : ''}
 
 Return valid JSON only (no markdown, no backticks) with exactly these two fields:
 1. "synopsis" — A 3-5 sentence (or short paragraph) description of the full story, suitable for the book description.
-2. "chapters" — An array of 5-10 chapter outlines. Each item: { "chapterNumber": 1, "title": "Chapter title", "summary": "2-3 sentence summary" }
+2. "chapters" — An array of 5-10 chapter outlines. Each item: { "chapterNumber": 1, "title": "Short title", "summary": "Short summary" }. CRITICAL: For each chapter, the combined string "title — summary" must be <= 100 characters.
 
 Example format:
 {"synopsis": "Full story description here...", "chapters": [{"chapterNumber": 1, "title": "...", "summary": "..."}, ...]}`;
