@@ -360,6 +360,7 @@ function normalizeNovelsForExport(novels) {
     if (!safeStr(novel.show)) novel.show = 'yes';
     if (!safeStr(novel.collection)) novel.collection = safeStr(document.getElementById('collectionName')?.value);
     if (!getCategoriesForExport(novel)) novel.cateogories = safeStr(document.getElementById('categoryName')?.value) || novel.genre || 'Fiction';
+    if (!safeStr(novel.thumbnailPrompt)) novel.thumbnailPrompt = buildThumbnailPromptFromNovel(novel);
   });
 }
 
@@ -565,14 +566,16 @@ function buildExportRowsForNovel(novelIndex, novel, collection, thumbPath, cover
   const tags = getTagsForExport(novel);
   const coll = safeStr(novel.collection) || collection;
   const title = safeStr(novel.title);
+  const hasThumb = !!pickThumbnailDataUrl(novelIndex, novel);
+  const thumbCell = hasThumb ? thumbPath : (safeStr(novel.thumbnailPrompt) || buildThumbnailPromptFromNovel(novel));
 
   if (allNums.length === 0) {
-    rows.push([thumbPath, title, description, premium || 'yes', show || 'yes', categories, coll, author, tags, '', '']);
+    rows.push([thumbCell, title, description, premium || 'yes', show || 'yes', categories, coll, author, tags, '', '']);
     return rows;
   }
   allNums.forEach(num => {
     rows.push([
-      thumbPath,
+      thumbCell,
       title,
       description,
       premium || 'yes',
@@ -661,6 +664,8 @@ async function ensureThumbnailsForExport() {
   const novels = state.novels || [];
   if (!Array.isArray(novels) || !novels.length) return;
   if (!canGenerateImages()) {
+    // Ensure prompt fallback exists even without images
+    normalizeNovelsForExport(novels);
     showToast('Image generation is not available; exporting without thumbnails.', 'info');
     return;
   }
@@ -1130,8 +1135,9 @@ Generate exactly ${formData.numNovels} novel templates. Each novel template MUST
 13. **category** — Reader/info category (e.g. "Young Adult", "Adult Fiction", "Children's", "Non-fiction", "Romance", "Fantasy")
 14. **collection** — "${formData.collectionName || ''}"
 15. **cateogories** — "${formData.cateogoriesName || ''}"
-16. **premium** — "yes" or "no" (whether the novel is premium content)
-17. **show** — "yes" or "no" (whether to show the novel in listings)
+16. **thumbnailPrompt** — A ready-to-paste prompt for Gemini Image generation to create a square 1:1 thumbnail image (NO TEXT). Must be a single string.
+17. **premium** — "yes" or "no" (whether the novel is premium content)
+18. **show** — "yes" or "no" (whether to show the novel in listings)
 
 Each novel should be DISTINCT — different plot, different character dynamics, different themes — while still being inspired by the creative brief.
 CRITICAL: Every novel MUST have a non-empty synopsis (3-5 sentences minimum) and MUST have 5-10 chapters with chapterNumber, title, and summary for each.
@@ -1160,6 +1166,7 @@ You MUST return valid JSON only. No markdown code blocks, no backticks, no expla
       "category": "...",
       "collection": "...",
       "cateogories": "...",
+      "thumbnailPrompt": "...",
       "premium": "yes",
       "show": "yes"
     }
@@ -1167,6 +1174,33 @@ You MUST return valid JSON only. No markdown code blocks, no backticks, no expla
 }`;
 
   return prompt;
+}
+
+function buildThumbnailPromptFromNovel(novel) {
+  const title = safeStr(novel?.title) || 'Untitled novel';
+  const genre = safeStr(novel?.genre) || safeStr(novel?.cateogories) || safeStr(novel?.category) || 'Fiction';
+  const setting = safeStr(novel?.background) || 'Not specified';
+  const mood = safeStr(novel?.narratorTone) || 'Cinematic';
+  const synopsis = safeStr(novel?.synopsis);
+  const motifs = synopsis
+    ? synopsis.split(/[.?!]/).map(s => s.trim()).filter(Boolean).slice(0, 2).join(' / ')
+    : '';
+
+  const lines = [
+    'Create a SQUARE 1:1 novel thumbnail image (NO TEXT, no typography, no watermark, no logo).',
+    `Title concept: "${title}"`,
+    `Genre: ${genre}`,
+    `Setting: ${setting}`,
+    `Mood/tone: ${mood}`,
+    motifs ? `Key elements: ${motifs}` : 'Key elements: 1–3 strong visual motifs from the story.',
+    '',
+    'Style: cinematic, professional cover-art quality, high contrast, clear focal point, simple readable silhouette at small size.',
+    'Composition: centered subject, minimal clutter, dramatic lighting, sharp focus.',
+    'Constraints: avoid readable text, avoid extra limbs/fingers, avoid blurry faces.',
+    '',
+    'Output: 1 image only.',
+  ];
+  return lines.join('\n');
 }
 
 // --- Test API (minimal call to verify key) ---
@@ -1538,6 +1572,11 @@ function createNovelCard(novel, index) {
       <div class="novel-field">
         <div class="novel-field-label">🌍 Background / Setting</div>
         <div class="novel-field-content editable" contenteditable="true" data-novel="${index}" data-field="background">${escapeHtml(novel.background || 'N/A')}</div>
+      </div>
+
+      <div class="novel-field">
+        <div class="novel-field-label">🖼️ Thumbnail Prompt (paste into Gemini Image)</div>
+        <div class="novel-field-content editable" contenteditable="true" data-novel="${index}" data-field="thumbnailPrompt">${escapeHtml(novel.thumbnailPrompt || 'N/A')}</div>
       </div>
 
       <div class="divider"></div>
