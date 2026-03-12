@@ -325,6 +325,7 @@ function getExampleTemplates() {
 function stampCollectionAndCategoriesFromForm(novels) {
   const collection = safeStr(document.getElementById('collectionName')?.value);
   const cateogories = safeStr(document.getElementById('categoryName')?.value);
+  const formAuthor = safeStr(document.getElementById('authorName')?.value);
   if (!Array.isArray(novels)) return;
   novels.forEach(novel => {
     if (!novel || typeof novel !== 'object') return;
@@ -333,6 +334,8 @@ function stampCollectionAndCategoriesFromForm(novels) {
       novel.cateogories = cateogories;
       if (!novel.genre) novel.genre = cateogories;
     }
+    if (formAuthor) novel.authorName = formAuthor;
+    else if (!safeStr(novel.authorName)) novel.authorName = 'Unknown Author';
     if (!safeStr(novel.premium)) novel.premium = 'yes';
     if (!safeStr(novel.show)) novel.show = 'yes';
   });
@@ -558,7 +561,7 @@ function buildExportRowsForNovel(novelIndex, novel, collection, thumbPath, cover
   const premium = safeStr(novel.premium);
   const show = safeStr(novel.show);
   const categories = getCategoriesForExport(novel);
-  const author = safeStr(novel.authorName || novel.author);
+  const author = safeStr(novel.authorName || novel.author) || safeStr(document.getElementById('authorName')?.value) || 'Unknown Author';
   const tags = getTagsForExport(novel);
   const coll = safeStr(novel.collection) || collection;
   const title = safeStr(novel.title);
@@ -684,6 +687,7 @@ async function handleExportCsv() {
       showToast('Nothing to export yet. Generate novel templates first.', 'error');
       return;
     }
+    normalizeNovelsForExport(state.novels);
     await ensureThumbnailsForExport();
     const collection = getExportCollection();
     const lines = [EXPORT_HEADERS.map(csvEscape).join(',')];
@@ -710,6 +714,7 @@ async function handleExportZipPackage() {
       showToast('Nothing to export yet. Generate novel templates first.', 'error');
       return;
     }
+    normalizeNovelsForExport(state.novels);
     if (!window.JSZip) {
       showToast('ZIP export library failed to load. Reload and try again.', 'error');
       return;
@@ -799,6 +804,7 @@ async function handleExportXlsx() {
       showToast('Nothing to export yet. Generate novel templates first.', 'error');
       return;
     }
+    normalizeNovelsForExport(state.novels);
     if (!window.ExcelJS) {
       showToast('XLSX export library failed to load. Reload and try again.', 'error');
       return;
@@ -1989,7 +1995,7 @@ async function handleGenerateAllStories() {
         await generateFullStory(index, key);
         done++;
         showToast(`Stories: ${done}/${total}`, 'info');
-        await new Promise(r => setTimeout(r, 350));
+        await new Promise(r => setTimeout(r, 80));
       } catch (e) {
         failed.push({ index, message: e?.message || String(e) });
       }
@@ -2111,8 +2117,10 @@ async function generateFullStory(index, apiKeyOverride) {
   }
 
   const btn = document.getElementById(`storyBtn_${index}`);
-  btn.classList.add('loading');
-  btn.disabled = true;
+  if (btn) {
+    btn.classList.add('loading');
+    btn.disabled = true;
+  }
 
   // Auto-expand the card to show progress
   const card = document.querySelector(`.novel-card[data-index="${index}"]`);
@@ -2192,17 +2200,24 @@ Rules:
     storySection.style.display = 'block';
 
     // Update button
-    btn.innerHTML = '<span class="btn-text">✅ Story Generated</span>';
-    btn.classList.remove('loading');
+    if (btn) {
+      btn.innerHTML = '<span class="btn-text">✅ Story Generated</span>';
+      btn.classList.remove('loading');
+    }
 
     showToast(`Full story generated for "${novel.title}"!`, 'success');
-    storySection.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    if (storySection) storySection.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 
   } catch (error) {
     console.error('Story generation error:', error);
-    showToast(`Story generation failed: ${error.message}`, 'error');
-    btn.classList.remove('loading');
-    btn.disabled = false;
+    const msg = error?.message || String(error);
+    showToast(`Story generation failed: ${msg}`, 'error');
+    if (btn) {
+      btn.classList.remove('loading');
+      btn.disabled = false;
+      const txt = btn.querySelector('.btn-text');
+      if (txt) txt.textContent = '📖 Generate Full Story';
+    }
   }
 }
 
@@ -2293,8 +2308,14 @@ async function callGeminiAPIRawWithKey(prompt, apiKeyOverride) {
         throw new Error(lastErr);
       }
       const data = await response.json();
-      const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (!text) throw new Error('No content returned from Gemini API');
+      const cand = data.candidates?.[0];
+      const text = cand?.content?.parts?.[0]?.text;
+      if (!text) {
+        const reason = cand?.finishReason || cand?.finishReasonReason || '';
+        if (String(reason).toLowerCase().includes('safety')) throw new Error('Response blocked by safety filters. Try a different prompt or model.');
+        if (String(reason).toLowerCase().includes('max')) throw new Error('Story too long; output was truncated. Try fewer chapters.');
+        throw new Error('No content returned from Gemini API. Try again.');
+      }
       return text;
     } catch (e) {
       lastErr = e?.message || lastErr;
