@@ -1700,7 +1700,8 @@ function createNovelCard(novel, index) {
     chaptersHtml = novel.chapters.map((ch, ci) => `
       <div class="chapter-item" data-novel="${index}" data-chapterindex="${ci}">
         <span class="chapter-num">Ch.${ch.chapterNumber}</span>
-        <span class="chapter-title editable" contenteditable="true">${escapeHtml(ch.title)} — ${escapeHtml(ch.summary)}</span>
+        <span class="chapter-title editable" contenteditable="true" data-field="chapterTitle">${escapeHtml(ch.title)}</span>
+        <span class="chapter-summary editable" contenteditable="true" data-field="chapterSummary">${escapeHtml(ch.summary)}</span>
       </div>
     `).join('');
   }
@@ -1959,9 +1960,17 @@ function attachEditSyncListeners(container) {
       const chIndex = parseInt(chapterIndex, 10);
       const novel = state.novels[novelIndex];
       if (novel.chapters && novel.chapters[chIndex]) {
-        const parts = value.split(' — ');
-        novel.chapters[chIndex].title = (parts[0] || '').trim();
-        novel.chapters[chIndex].summary = (parts[1] || value).trim();
+        const f = el.dataset.field;
+        if (f === 'chapterTitle') {
+          novel.chapters[chIndex].title = value;
+        } else if (f === 'chapterSummary') {
+          novel.chapters[chIndex].summary = value;
+        } else {
+          // Back-compat: old combined format "title — summary"
+          const parts = value.split(' — ');
+          novel.chapters[chIndex].title = (parts[0] || '').trim();
+          novel.chapters[chIndex].summary = (parts[1] || '').trim();
+        }
       }
     }
 
