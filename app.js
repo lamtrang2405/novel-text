@@ -469,6 +469,8 @@ function normalizeNovelsForExport(novels) {
     if (!synopsis || synopsis === 'N/A') {
       novel.synopsis = safeStr(novel.draftScript) || (novel.title ? `A story: ${novel.title}.` : 'No synopsis yet.');
     }
+    // Enforce app-level synopsis constraint (short hook line).
+    novel.synopsis = clampText(novel.synopsis, 100);
     if (!novel.chapters || !Array.isArray(novel.chapters) || novel.chapters.length === 0) {
       novel.chapters = [
         { chapterNumber: 1, title: 'Chapter 1', summary: novel.synopsis ? novel.synopsis.substring(0, 200) + (novel.synopsis.length > 200 ? '…' : '') : 'Opening.' }
@@ -713,10 +715,10 @@ function getFullStoryChaptersForExport(index) {
 }
 
 /** Export column order (reformatted template: one row per chapter) */
-const EXPORT_HEADERS = ['thumbnail', 'title', 'description', 'premium', 'show', 'categories', 'collection', 'author', 'tags', 'chapter_outline', 'chapter_content'];
+const EXPORT_HEADERS = ['title', 'description', 'premium', 'show', 'categories', 'collection', 'author', 'tags', 'chapter_outline', 'chapter_content'];
 
 /** Build one row per chapter for a novel. Each row has same novel metadata + one chapter_outline and chapter_content. */
-function buildExportRowsForNovel(novelIndex, novel, collection, thumbPath, coverPath) {
+function buildExportRowsForNovel(novelIndex, novel, collection) {
   const templateChapters = novel?.chapters || [];
   const storyChapters = getFullStoryChaptersForExport(novelIndex);
   const outlineByNum = {};
@@ -739,16 +741,13 @@ function buildExportRowsForNovel(novelIndex, novel, collection, thumbPath, cover
   const tags = getTagsForExport(novel);
   const coll = safeStr(novel.collection) || collection;
   const title = safeStr(novel.title);
-  const hasThumb = !!pickThumbnailDataUrl(novelIndex, novel);
-  const thumbCell = hasThumb ? thumbPath : (safeStr(novel.thumbnailPrompt) || buildThumbnailPromptFromNovel(novel));
 
   if (allNums.length === 0) {
-    rows.push([thumbCell, title, description, premium || 'yes', show || 'yes', categories, coll, author, tags, '', '']);
+    rows.push([title, description, premium || 'yes', show || 'yes', categories, coll, author, tags, '', '']);
     return rows;
   }
   allNums.forEach(num => {
     rows.push([
-      thumbCell,
       title,
       description,
       premium || 'yes',
@@ -839,6 +838,9 @@ function pickThumbnailDataUrl(novelIndex, novel) {
   return pickCoverDataUrl(novelIndex, novel);
 }
 
+// Ensure legacy callers (inline handlers / older exports) can always access it.
+try { window.pickThumbnailDataUrl = pickThumbnailDataUrl; } catch (_) {}
+
 /** Before export: ensure every novel has cover + thumbnail so thumbnail/cover columns are filled. */
 async function ensureThumbnailsForExport() {
   const novels = state.novels || [];
@@ -879,10 +881,7 @@ async function handleExportCsv() {
     const lines = [EXPORT_HEADERS.map(csvEscape).join(',')];
     for (let i = 0; i < state.novels.length; i++) {
       const novel = state.novels[i] || {};
-      // CSV can’t embed images. Use relative file paths so it works with the .zip package export.
-      const thumbPath = `thumbnails/novel_${i + 1}.png`;
-      const coverPath = `covers/novel_${i + 1}.png`;
-      const rows = buildExportRowsForNovel(i, novel, collection, thumbPath, coverPath);
+      const rows = buildExportRowsForNovel(i, novel, collection);
       rows.forEach(row => lines.push(row.map(csvEscape).join(',')));
     }
     const csv = lines.join('\r\n');
@@ -919,7 +918,7 @@ async function handleExportZipPackage() {
     const thumbs = zip.folder('thumbnails');
     const covers = zip.folder('covers');
 
-    // CSV that references the packaged file paths (one row per chapter, same format as Export CSV)
+    // CSV (one row per chapter, same format as Export CSV)
     const collection = getExportCollection();
     const csvLines = [EXPORT_HEADERS.map(csvEscape).join(',')];
 
@@ -938,9 +937,7 @@ async function handleExportZipPackage() {
       if (coverPng) covers.file(coverName, coverPng);
       if (thumbPng) thumbs.file(thumbName, thumbPng);
 
-      const thumbPath = `thumbnails/${thumbName}`;
-      const coverPath = `covers/${coverName}`;
-      const rows = buildExportRowsForNovel(i, novel, collection, thumbPath, coverPath);
+      const rows = buildExportRowsForNovel(i, novel, collection);
       rows.forEach(row => csvLines.push(row.map(csvEscape).join(',')));
 
       galleryCards.push(`
@@ -1011,22 +1008,19 @@ async function handleExportXlsx() {
     let rowNumber = 2;
     for (let i = 0; i < state.novels.length; i++) {
       const novel = state.novels[i] || {};
-      const thumbPath = `thumbnails/novel_${i + 1}.png`;
-      const coverPath = `covers/novel_${i + 1}.png`;
-      const rows = buildExportRowsForNovel(i, novel, collection, thumbPath, coverPath);
+      const rows = buildExportRowsForNovel(i, novel, collection);
       rows.forEach(row => {
         ws.addRow({
-          thumbnail: row[0],
-          title: row[1],
-          description: row[2],
-          premium: row[3],
-          show: row[4],
-          categories: row[5],
-          collection: row[6],
-          author: row[7],
-          tags: row[8],
-          chapter_outline: row[9],
-          chapter_content: row[10],
+          title: row[0],
+          description: row[1],
+          premium: row[2],
+          show: row[3],
+          categories: row[4],
+          collection: row[5],
+          author: row[6],
+          tags: row[7],
+          chapter_outline: row[8],
+          chapter_content: row[9],
         });
         ws.getRow(rowNumber).alignment = { vertical: 'top', wrapText: true };
         ws.getRow(rowNumber).height = 24;
@@ -1342,7 +1336,7 @@ function buildGeminiPrompt(formData) {
 Generate exactly ${formData.numNovels} novel templates. Each novel template MUST include ALL of the following fields:
 
 1. **title** — A compelling, unique title for the novel
-2. **synopsis** — A 3-5 paragraph synopsis of the full story
+2. **synopsis** — A SINGLE short hook line, maximum 100 characters (including spaces). No newlines.
 3. **draftScript** — The core scenario, script outline, and key ideas the story conveys
 4. **characters** — An array of characters, each with: name, role (protagonist/antagonist/supporting), age, description, arc (character development summary), gender ("male" or "female" for voice casting)
 5. **authorName** — "${formData.authorName}"
@@ -1361,7 +1355,7 @@ Generate exactly ${formData.numNovels} novel templates. Each novel template MUST
 18. **show** — "yes" or "no" (whether to show the novel in listings)
 
 Each novel should be DISTINCT — different plot, different character dynamics, different themes — while still being inspired by the creative brief.
-CRITICAL: Every novel MUST have a non-empty synopsis (3-5 sentences minimum) and MUST have 5-10 chapters with chapterNumber, title, and summary for each.
+CRITICAL: Every novel MUST have a non-empty synopsis that is <= 100 characters, and MUST have 5-10 chapters with chapterNumber, title, and summary for each.
 
 ## OUTPUT FORMAT (CRITICAL)
 You MUST return valid JSON only. No markdown code blocks, no backticks, no explanation—just the raw JSON object.
