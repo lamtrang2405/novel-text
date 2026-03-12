@@ -1533,7 +1533,7 @@ function createNovelCard(novel, index) {
 
       <div class="novel-field">
         <div class="novel-field-label">📖 Genre & Themes</div>
-        <div class="novel-field-content editable" contenteditable="true" data-novel="${index}" data-field="genre">${escapeHtml(novel.genre || 'N/A')}${themesHtml ? ' — ' + themesHtml : ''}</div>
+        <div class="novel-field-content editable" contenteditable="true" data-novel="${index}" data-field="genre">${escapeHtml(novel.genre || 'N/A')}${themesHtml ? ' | ' + themesHtml : ''}</div>
       </div>
 
       <div class="novel-field">
@@ -1736,8 +1736,8 @@ function attachEditSyncListeners(container) {
         const titleEl = container.querySelector(`.novel-card[data-index="${novelIndex}"] .novel-card-header .novel-title`);
         if (titleEl && titleEl !== el) titleEl.textContent = value || 'Untitled Novel';
       }
-      if (field === 'genre' && value.includes(' — ')) {
-        const parts = value.split(' — ');
+      if (field === 'genre' && value.includes(' | ')) {
+        const parts = value.split(' | ');
         state.novels[novelIndex].genre = (parts[0] || '').trim();
         state.novels[novelIndex].themes = (parts[1] || '')
           .split(/[·•]/)
@@ -1879,6 +1879,9 @@ function formatNovelTxt(novel, index) {
 
   if (novel.themes && novel.themes.length) {
     txt += `THEMES: ${novel.themes.join(', ')}\n`;
+  }
+  if (safeStr(novel.thumbnailPrompt)) {
+    txt += `THUMBNAIL_PROMPT: ${safeStr(novel.thumbnailPrompt)}\n`;
   }
 
   txt += `\n${'-'.repeat(40)}\n`;
