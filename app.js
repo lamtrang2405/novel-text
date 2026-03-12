@@ -450,7 +450,8 @@ function stampCollectionAndCategoriesFromForm(novels) {
     if (!novel || typeof novel !== 'object') return;
     if (collection) novel.collection = collection;
     if (cateogories) {
-      novel.cateogories = cateogories;
+      novel.cateogories = normalizeCategoryName(cateogories);
+      novel.category = novel.cateogories;
       if (!novel.genre) novel.genre = cateogories;
     }
     if (formAuthor) novel.authorName = formAuthor;
@@ -480,7 +481,13 @@ function normalizeNovelsForExport(novels) {
     if (!safeStr(novel.premium)) novel.premium = 'yes';
     if (!safeStr(novel.show)) novel.show = 'yes';
     if (!safeStr(novel.collection)) novel.collection = safeStr(document.getElementById('collectionName')?.value);
-    if (!getCategoriesForExport(novel)) novel.cateogories = safeStr(document.getElementById('categoryName')?.value) || novel.genre || 'Fiction';
+    // Enforce allowed categories (and keep cateogories/category consistent).
+    const chosen = normalizeCategoryName(
+      safeStr(novel.cateogories || novel.categories || novel.category || novel.genre) ||
+      safeStr(document.getElementById('categoryName')?.value)
+    );
+    novel.cateogories = chosen;
+    novel.category = chosen;
     if (!safeStr(novel.thumbnailPrompt)) novel.thumbnailPrompt = buildThumbnailPromptFromNovel(novel);
     if (Array.isArray(novel.themes)) novel.themes = normalizeTagList(novel.themes);
     if (Array.isArray(novel.tags)) novel.tags = normalizeTagList(novel.tags);
@@ -635,6 +642,53 @@ function clampText(s, maxChars) {
   return str.slice(0, Math.max(0, maxChars - 1)).trimEnd() + '…';
 }
 
+// --- Category constraints (must match allowed app categories) ---
+const ALLOWED_CATEGORIES = [
+  'Romance',
+  'Werewolf',
+  'Mafia',
+  'System',
+  'Fantasy',
+  'Urban',
+  'LGBTQ+',
+  'YA/TEEN',
+  'Paranormal',
+  'Mystery/Thriller',
+  'Eastern',
+  'Games',
+  'History',
+  'MM Romance',
+  'Sci-Fi',
+  'War',
+  'Other',
+];
+
+function normalizeCategoryName(raw) {
+  const s = safeStr(raw);
+  if (!s) return '';
+  const lower = s.toLowerCase();
+  const byLower = new Map(ALLOWED_CATEGORIES.map(c => [c.toLowerCase(), c]));
+  if (byLower.has(lower)) return byLower.get(lower);
+  // Common variants / fuzzy mapping
+  if (lower.includes('sci') || lower.includes('science')) return 'Sci-Fi';
+  if (lower.includes('thriller') || lower.includes('mystery') || lower.includes('suspense') || lower.includes('crime')) return 'Mystery/Thriller';
+  if (lower.includes('ya') || lower.includes('teen') || lower.includes('young adult')) return 'YA/TEEN';
+  if (lower.includes('lgbt')) return 'LGBTQ+';
+  if (lower.includes('mm') || (lower.includes('male') && lower.includes('male'))) return 'MM Romance';
+  if (lower.includes('paranormal')) return 'Paranormal';
+  if (lower.includes('urban')) return 'Urban';
+  if (lower.includes('werewolf') || lower.includes('wolf') || lower.includes('lycan')) return 'Werewolf';
+  if (lower.includes('mafia') || lower.includes('gang')) return 'Mafia';
+  if (lower.includes('romance')) return 'Romance';
+  if (lower.includes('fantasy')) return 'Fantasy';
+  if (lower.includes('system')) return 'System';
+  if (lower.includes('game')) return 'Games';
+  if (lower.includes('history') || lower.includes('historical')) return 'History';
+  if (lower.includes('war') || lower.includes('military')) return 'War';
+  if (lower.includes('eastern') || lower.includes('wuxia') || lower.includes('xianxia') || lower.includes('china') || lower.includes('korea') || lower.includes('japan')) return 'Eastern';
+  return 'Other';
+}
+
 function clampChapterLine(title, summary, maxChars = 100) {
   const t = safeStr(title);
   const s = safeStr(summary);
@@ -714,8 +768,34 @@ function getFullStoryChaptersForExport(index) {
   return chapters;
 }
 
-/** Export column order (reformatted template: one row per chapter) */
-const EXPORT_HEADERS = ['title', 'description', 'premium', 'show', 'categories', 'collection', 'author', 'tags', 'chapter_outline', 'chapter_content'];
+function storyIsCompleteForNovel(index, novel) {
+  if (!novel || typeof novel !== 'object') return false;
+  const expected = (Array.isArray(novel.chapters) ? novel.chapters : [])
+    .map(c => parseInt(c?.chapterNumber, 10))
+    .filter(n => !Number.isNaN(n) && n >= 1);
+  if (!expected.length) return false;
+  const parsed = getFullStoryChaptersForExport(index);
+  const contentByNum = new Map(parsed.map(ch => [parseInt(ch.number, 10), safeStr(ch.content)]));
+  // Require every expected chapter number to exist and have some prose.
+  return expected.every(n => {
+    const txt = contentByNum.get(n) || '';
+    return txt.length >= 200; // "full chapter" heuristic
+  });
+}
+
+/** Export column order (one row per chapter/episode) */
+const EXPORT_HEADERS = [
+  'title',
+  'description',
+  'premiumStatus',
+  'tags',
+  'categoryNames',
+  'collectionNames',
+  'authorNames',
+  'narratorNames',
+  'episodeTitle',
+  'episodeContent',
+];
 
 /** Build one row per chapter for a novel. Each row has same novel metadata + one chapter_outline and chapter_content. */
 function buildExportRowsForNovel(novelIndex, novel, collection) {
@@ -723,39 +803,40 @@ function buildExportRowsForNovel(novelIndex, novel, collection) {
   const storyChapters = getFullStoryChaptersForExport(novelIndex);
   const outlineByNum = {};
   templateChapters.forEach(ch => {
-    outlineByNum[ch.chapterNumber] = `Ch${ch.chapterNumber}: ${safeStr(ch.title)} — ${safeStr(ch.summary)}`;
+    // Export expects only the episode/chapter title (no summary/detail).
+    outlineByNum[ch.chapterNumber] = safeStr(ch.title);
   });
   const contentByNum = {};
   storyChapters.forEach(ch => {
     contentByNum[ch.number] = safeStr(ch.content);
     if (!outlineByNum[ch.number])
-      outlineByNum[ch.number] = ch.title ? `Ch${ch.number}: ${ch.title}` : `Chapter ${ch.number}`;
+      outlineByNum[ch.number] = safeStr(ch.title) || `Chapter ${ch.number}`;
   });
   const allNums = [...new Set([...Object.keys(outlineByNum).map(Number), ...Object.keys(contentByNum).map(Number)])].sort((a, b) => a - b);
   const rows = [];
-  const description = clampText(safeStr(novel.synopsis), 100);
-  const premium = safeStr(novel.premium);
-  const show = safeStr(novel.show);
-  const categories = getCategoriesForExport(novel);
-  const author = safeStr(novel.authorName || novel.author) || safeStr(document.getElementById('authorName')?.value) || 'Unknown Author';
-  const tags = getTagsForExport(novel);
-  const coll = safeStr(novel.collection) || collection;
   const title = safeStr(novel.title);
+  const description = clampText(safeStr(novel.synopsis), 100);
+  const premiumStatus = safeStr(novel.premiumStatus || novel.premium) || 'yes';
+  const tags = getTagsForExport(novel);
+  const categoryNames = getCategoriesForExport(novel);
+  const collectionNames = safeStr(novel.collection) || collection;
+  const authorNames = safeStr(novel.authorName || novel.author) || safeStr(document.getElementById('authorName')?.value) || 'Anonymous';
+  const narratorNames = safeStr(novel.narratorNames || novel.narratorName || novel.narratorTone) || safeStr(document.getElementById('narratorTone')?.value) || '';
 
   if (allNums.length === 0) {
-    rows.push([title, description, premium || 'yes', show || 'yes', categories, coll, author, tags, '', '']);
+    rows.push([title, description, premiumStatus, tags, categoryNames, collectionNames, authorNames, narratorNames, '', '']);
     return rows;
   }
   allNums.forEach(num => {
     rows.push([
       title,
       description,
-      premium || 'yes',
-      show || 'yes',
-      categories,
-      coll,
-      author,
+      premiumStatus,
       tags,
+      categoryNames,
+      collectionNames,
+      authorNames,
+      narratorNames,
       outlineByNum[num] || `Chapter ${num}`,
       contentByNum[num] || '',
     ]);
@@ -876,7 +957,6 @@ async function handleExportCsv() {
       return;
     }
     normalizeNovelsForExport(state.novels);
-    await ensureThumbnailsForExport();
     const collection = getExportCollection();
     const lines = [EXPORT_HEADERS.map(csvEscape).join(',')];
     for (let i = 0; i < state.novels.length; i++) {
@@ -992,14 +1072,13 @@ async function handleExportXlsx() {
       showToast('XLSX export library failed to load. Reload and try again.', 'error');
       return;
     }
-    await ensureThumbnailsForExport();
     const collection = getExportCollection();
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet('Novels');
     ws.columns = EXPORT_HEADERS.map((h, idx) => ({
       header: h,
       key: h,
-      width: h === 'chapter_content' || h === 'description' ? 60 : h === 'chapter_outline' ? 48 : 20,
+      width: h === 'episodeContent' || h === 'description' ? 60 : h === 'episodeTitle' ? 48 : 20,
     }));
     ws.getRow(1).font = { bold: true };
     ws.getRow(1).alignment = { vertical: 'middle' };
@@ -1013,14 +1092,14 @@ async function handleExportXlsx() {
         ws.addRow({
           title: row[0],
           description: row[1],
-          premium: row[2],
-          show: row[3],
-          categories: row[4],
-          collection: row[5],
-          author: row[6],
-          tags: row[7],
-          chapter_outline: row[8],
-          chapter_content: row[9],
+          premiumStatus: row[2],
+          tags: row[3],
+          categoryNames: row[4],
+          collectionNames: row[5],
+          authorNames: row[6],
+          narratorNames: row[7],
+          episodeTitle: row[8],
+          episodeContent: row[9],
         });
         ws.getRow(rowNumber).alignment = { vertical: 'top', wrapText: true };
         ws.getRow(rowNumber).height = 24;
@@ -1347,7 +1426,7 @@ Generate exactly ${formData.numNovels} novel templates. Each novel template MUST
 10. **chapters** — An array of 5-10 chapter outlines, each with: chapterNumber, title, summary (SHORT). CRITICAL: For each chapter, the combined string "${'title'} — ${'summary'}" must be <= 100 characters.
 11. **themes** — Array of core themes explored in the novel
 12. **genre** — Primary and secondary genres
-13. **category** — Reader/info category (e.g. "Young Adult", "Adult Fiction", "Children's", "Non-fiction", "Romance", "Fantasy")
+13. **category** — MUST be exactly ONE of: ${ALLOWED_CATEGORIES.map(c => `"${c}"`).join(', ')} (no extra text)
 14. **collection** — "${formData.collectionName || ''}"
 15. **cateogories** — "${formData.cateogoriesName || ''}"
 16. **thumbnailPrompt** — A ready-to-paste prompt for Gemini Image generation to create a square 1:1 thumbnail image (NO TEXT). Must be a single string.
@@ -1852,7 +1931,6 @@ function createNovelCard(novel, index) {
       <div class="chapter-item" data-novel="${index}" data-chapterindex="${ci}">
         <span class="chapter-num">Ch.${ch.chapterNumber}</span>
         <span class="chapter-title editable" contenteditable="true" data-field="chapterTitle">${escapeHtml(ch.title)}</span>
-        <span class="chapter-summary editable" contenteditable="true" data-field="chapterSummary">${escapeHtml(ch.summary)}</span>
       </div>
     `).join('');
   }
@@ -2372,11 +2450,15 @@ function toggleSection(sectionId) {
 async function handleGenerateAllStories() {
   // If user didn't mark manual review, still allow generating for all templates.
   const eligible = (state.reviewedNovels.size ? [...state.reviewedNovels] : (state.novels || []).map((_, i) => i))
-    .filter(i => !state.stories[i]);
+    .filter(i => {
+      const novel = state.novels?.[i];
+      if (!state.stories[i]) return true;
+      return !storyIsCompleteForNovel(i, novel);
+    });
   if (!eligible.length) {
     showToast(state.reviewedNovels.size === 0
-      ? 'All templates already have stories'
-      : 'All reviewed templates already have stories',
+      ? 'All templates already have complete stories'
+      : 'All reviewed templates already have complete stories',
     'info');
     return;
   }
@@ -2435,7 +2517,8 @@ function novelsNeedingMissingData() {
     const needsSynopsis = !synopsis || synopsis === 'N/A' || synopsis.length < 50 || synopsis.startsWith('A story:') && synopsis.length < 80;
     const chapters = novel.chapters || [];
     const needsChapters = chapters.length < 2 || (chapters.length === 1 && safeStr(chapters[0].summary).length < 50);
-    if (needsSynopsis || needsChapters) indices.push(i);
+    const needsStoryContent = !storyIsCompleteForNovel(i, novel);
+    if (needsSynopsis || needsChapters || needsStoryContent) indices.push(i);
   });
   return indices;
 }
@@ -2450,12 +2533,12 @@ async function generateMissingDataForNovel(index) {
 **Draft/Core idea:** ${(novel.draftScript || '').substring(0, 800)}
 ${novel.background ? `**Setting:** ${novel.background.substring(0, 300)}` : ''}
 
-Return valid JSON only (no markdown, no backticks) with exactly these two fields:
-1. "synopsis" — A 3-5 sentence (or short paragraph) description of the full story, suitable for the book description.
+Return valid JSON only (no markdown, no backticks) with exactly these fields:
+1. "synopsis" — A SINGLE short hook line, maximum 100 characters (including spaces). No newlines.
 2. "chapters" — An array of 5-10 chapter outlines. Each item: { "chapterNumber": 1, "title": "Short title", "summary": "Short summary" }. CRITICAL: For each chapter, the combined string "title — summary" must be <= 100 characters.
 
 Example format:
-{"synopsis": "Full story description here...", "chapters": [{"chapterNumber": 1, "title": "...", "summary": "..."}, ...]}`;
+{"synopsis": "Short hook here...", "chapters": [{"chapterNumber": 1, "title": "...", "summary": "..."}, ...]}`;
 
   const result = await callGeminiAPI(prompt);
   if (result.synopsis) novel.synopsis = result.synopsis;
@@ -2492,7 +2575,7 @@ Example format:
 async function handleFillMissingData() {
   const indices = novelsNeedingMissingData();
   if (!indices.length) {
-    showToast('All templates already have synopsis and chapter outlines.', 'success');
+    showToast('All templates already have synopsis, chapter outlines, and full chapter content.', 'success');
     return;
   }
   const keys = getApiKeys();
@@ -2504,9 +2587,16 @@ async function handleFillMissingData() {
   if (btn) { btn.classList.add('loading'); btn.disabled = true; }
   showToast(`Filling missing data for ${indices.length} novel(s)...`, 'info');
   let done = 0;
+  let keyCursor = 0;
   for (const i of indices) {
     try {
       await generateMissingDataForNovel(i);
+      // Also ensure chapter content exists for export (episodeContent).
+      const k = keys[keyCursor % keys.length];
+      keyCursor++;
+      if (!storyIsCompleteForNovel(i, state.novels?.[i])) {
+        await generateFullStory(i, k);
+      }
       done++;
       showToast(`Filled ${done}/${indices.length}`, 'info');
       await new Promise(r => setTimeout(r, 400));
