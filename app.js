@@ -1724,10 +1724,9 @@ function createNovelCard(novel, index) {
         ${coverThumb ? `<a href="${coverHref}" target="_blank" rel="noopener" title="Open cover image"><img class="novel-cover-thumb" data-index="${index}" src="${coverThumb}" alt="Cover ${index + 1}"/></a>` : ''}
       </div>
       <div class="actions">
-        ${isReviewed
-    ? '<button class="btn btn-story btn-sm" onclick="event.stopPropagation(); generateFullStory(' + index + ')" id="storyBtn_' + index + '"><span class="spinner"></span><span class="btn-text">📖 Generate Full Story</span></button>'
-    : ''
-}
+        <button class="btn btn-story btn-sm" onclick="event.stopPropagation(); generateFullStory(${index})" id="storyBtn_${index}">
+          <span class="spinner"></span><span class="btn-text">📖 Generate Full Story</span>
+        </button>
         <button class="btn btn-secondary btn-sm review-toggle ${isReviewed ? 'reviewed' : ''}" onclick="event.stopPropagation(); toggleManualReview(${index})" title="${isReviewed ? 'Revoke manual review' : 'Mark as passed manual review'}">
           ${isReviewed ? '✅ Passed' : '⬜ Review'}
         </button>
@@ -1825,7 +1824,7 @@ function createNovelCard(novel, index) {
       <div class="divider"></div>
 
       <!-- Review hint when not yet passed -->
-      ${!isReviewed ? '<div class="review-required-inline" id="reviewRequired_' + index + '"><span class="review-required-icon">📋</span> Mark as <strong>Passed Manual Review</strong> in the header to enable full story generation.</div>' : ''}
+      ${!isReviewed ? '<div class="review-required-inline" id="reviewRequired_' + index + '"><span class="review-required-icon">📋</span> (Optional) Mark as <strong>Passed Manual Review</strong> to track templates you approve.</div>' : ''}
 
       <!-- Full Story Section (populated after generation) -->
       <div class="story-section" id="storySection_${index}" style="display:none">
@@ -2211,10 +2210,12 @@ function toggleSection(sectionId) {
 
 // --- Generate All Stories (for all reviewed templates that don't have a story yet) ---
 async function handleGenerateAllStories() {
-  const eligible = [...state.reviewedNovels].filter(i => !state.stories[i]);
+  // If user didn't mark manual review, still allow generating for all templates.
+  const eligible = (state.reviewedNovels.size ? [...state.reviewedNovels] : (state.novels || []).map((_, i) => i))
+    .filter(i => !state.stories[i]);
   if (!eligible.length) {
     showToast(state.reviewedNovels.size === 0
-      ? 'Mark templates as Passed Manual Review first'
+      ? 'All templates already have stories'
       : 'All reviewed templates already have stories',
     'info');
     return;
@@ -2464,7 +2465,8 @@ Rules:
   } catch (error) {
     console.error('Story generation error:', error);
     const msg = error?.message || String(error);
-    showToast(`Story generation failed: ${msg}`, 'error');
+    const provider = getAIProvider() === 'deepseek' ? 'DeepSeek' : 'Gemini';
+    showToast(`Story generation failed (${provider}): ${msg}`, 'error');
     if (btn) {
       btn.classList.remove('loading');
       btn.disabled = false;
