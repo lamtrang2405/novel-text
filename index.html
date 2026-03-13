@@ -341,6 +341,10 @@
         <h2>📚 Generated Novels</h2>
         <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
           <span class="results-count" id="resultsCount"></span>
+          <button class="btn btn-primary btn-sm" id="generateThumbnails34AllBtn" title="Generate 3:4 ratio thumbnails for all novels from their templates">
+            <span class="spinner"></span>
+            <span class="btn-text">🖼️ Generate novel thumbnails (3:4)</span>
+          </button>
           <button class="btn btn-primary btn-sm" id="generateAllStoriesBtn">
             <span class="spinner"></span>
             <span class="btn-text">📖 Generate All Stories</span>
@@ -360,6 +364,15 @@
           </div>
         </div>
       </div>
+      <!-- Generate novel thumbnail tab: 3:4 thumbnails from template -->
+      <div class="glass-card thumbnail-tab-card" id="generateThumbnailTab" style="animation-delay: 0.1s; margin-bottom: 16px;">
+        <div class="card-title">
+          <div class="icon pink">🖼️</div>
+          Generate novel thumbnails
+          <span class="optional-badge">3:4 ratio</span>
+        </div>
+        <p class="form-hint" style="margin-top: 8px;">Generate a 3:4 portrait thumbnail for each novel from its template (title, genre, synopsis, mood). Use the button above for all novels, or the per-novel button on each card.</p>
+      </div>
       <div id="novelsContainer"></div>
     </section>
 
@@ -370,7 +383,7 @@
 
   <script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
-  <script src="app.js?v=38"></script>
+  <script src="app.js?v=39"></script>
 </body>
 
 </html>

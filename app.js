@@ -300,6 +300,7 @@ function initApp() {
   if (genBtn) genBtn.addEventListener('click', handleGenerate);
   document.getElementById('loadExampleBtn')?.addEventListener('click', loadExampleTemplates);
   document.getElementById('testApiBtn')?.addEventListener('click', handleTestApi);
+  document.getElementById('generateThumbnails34AllBtn')?.addEventListener('click', generateThumbnails34ForAll);
   document.getElementById('generateAllStoriesBtn')?.addEventListener('click', handleGenerateAllStories);
   document.getElementById('fillMissingDataBtn')?.addEventListener('click', handleFillMissingData);
 
@@ -1552,6 +1553,33 @@ function buildThumbnailPromptFromNovel(novel) {
   return lines.join('\n');
 }
 
+/** Build prompt for 3:4 portrait novel thumbnail (book-cover style) from template. */
+function buildThumbnail34PromptFromNovel(novel) {
+  const title = safeStr(novel?.title) || 'Untitled novel';
+  const genre = safeStr(novel?.genre) || safeStr(novel?.cateogories) || safeStr(novel?.category) || 'Fiction';
+  const setting = safeStr(novel?.background) || 'Not specified';
+  const mood = safeStr(novel?.narratorTone) || 'Cinematic';
+  const synopsis = safeStr(novel?.synopsis);
+  const motifs = synopsis
+    ? synopsis.split(/[.?!]/).map(s => s.trim()).filter(Boolean).slice(0, 2).join(' / ')
+    : '';
+  const lines = [
+    'Create a VERTICAL 3:4 portrait novel thumbnail / book cover image (NO TEXT, no typography, no watermark, no logo).',
+    `Title concept: "${title}"`,
+    `Genre: ${genre}`,
+    `Setting: ${setting}`,
+    `Mood/tone: ${mood}`,
+    motifs ? `Key elements: ${motifs}` : 'Key elements: 1–3 strong visual motifs from the story.',
+    '',
+    'Style: cinematic, professional book-cover quality, high contrast, clear focal point. Portrait orientation (taller than wide).',
+    'Composition: centered or rule-of-thirds subject, dramatic lighting, sharp focus. Suited for 3:4 aspect ratio.',
+    'Constraints: avoid readable text, avoid extra limbs/fingers, avoid blurry faces.',
+    '',
+    'Output: 1 image only.',
+  ];
+  return lines.join('\n');
+}
+
 // --- Test API (minimal call to verify key) ---
 async function handleTestApi() {
   const keys = getApiKeys();
@@ -1933,6 +1961,64 @@ async function generateCoversForAllTemplates() {
   showToast('Cover thumbnails ready', 'success');
 }
 
+// --- Generate novel thumbnail (3:4 ratio) from template ---
+async function generateThumbnail34ForNovel(index) {
+  const novel = state.novels?.[index];
+  if (!novel) return;
+  const btn = document.getElementById(`generateThumbnail34Btn_${index}`);
+  if (btn) { btn.disabled = true; btn.classList.add('loading'); }
+  try {
+    const prompt = buildThumbnail34PromptFromNovel(novel);
+    if (getAIProvider() === 'gemini' && getApiKey()) {
+      const dataUrl = await callGeminiImagen(prompt, { aspectRatio: '3:4' });
+      if (dataUrl) {
+        novel.thumbnail = dataUrl;
+        novel.cover = dataUrl;
+        const card = document.querySelector(`.novel-card[data-index="${index}"]`);
+        const img = card?.querySelector(`.novel-cover-thumb[data-index="${index}"]`);
+        if (img) img.src = dataUrl; else ensureCoverThumbInCard(index);
+        showToast(`Thumbnail (3:4) generated for "${novel.title || 'Novel ' + (index + 1)}"`, 'success');
+      }
+    } else {
+      const dataUrl = await callImageGenerationAPI(prompt, novel);
+      if (dataUrl) {
+        novel.thumbnail = dataUrl;
+        novel.cover = dataUrl;
+        const card = document.querySelector(`.novel-card[data-index="${index}"]`);
+        const img = card?.querySelector(`.novel-cover-thumb[data-index="${index}"]`);
+        if (img) img.src = dataUrl; else ensureCoverThumbInCard(index);
+        showToast(`Thumbnail generated for "${novel.title || 'Novel ' + (index + 1)}" (free API may not be 3:4)`, 'success');
+      }
+    }
+  } catch (e) {
+    showToast(`Thumbnail failed: ${e?.message || 'Unknown error'}`, 'error');
+  }
+  if (btn) { btn.disabled = false; btn.classList.remove('loading'); }
+}
+
+async function generateThumbnails34ForAll() {
+  const novels = state.novels || [];
+  if (!novels.length) {
+    showToast('Generate novel templates first.', 'error');
+    return;
+  }
+  const btn = document.getElementById('generateThumbnails34AllBtn');
+  if (btn) { btn.disabled = true; btn.classList.add('loading'); }
+  const concurrency = Math.min(2, novels.length);
+  let done = 0;
+  showToast(`Generating 3:4 thumbnails for ${novels.length} novel(s)...`, 'info');
+  for (let i = 0; i < novels.length; i++) {
+    try {
+      await generateThumbnail34ForNovel(i);
+      done++;
+      showToast(`Thumbnails: ${done}/${novels.length}`, 'info');
+    } catch (_) {}
+    if (i < novels.length - 1) await new Promise(r => setTimeout(r, 500));
+  }
+  if (btn) { btn.disabled = false; btn.classList.remove('loading'); }
+  showToast('Novel thumbnails (3:4) finished', 'success');
+}
+
 // --- Render Results ---
 function renderResults(novels) {
   const section = document.getElementById('resultsSection');
@@ -2009,6 +2095,9 @@ function createNovelCard(novel, index) {
         ${coverThumb ? `<a href="${coverHref}" target="_blank" rel="noopener" title="Open cover image"><img class="novel-cover-thumb" data-index="${index}" src="${coverThumb}" alt="Cover ${index + 1}"/></a>` : ''}
       </div>
       <div class="actions">
+        <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); generateThumbnail34ForNovel(${index})" id="generateThumbnail34Btn_${index}" title="Generate 3:4 thumbnail from this novel template">
+          <span class="spinner"></span><span class="btn-text">🖼️ Thumbnail (3:4)</span>
+        </button>
         <button class="btn btn-story btn-sm" onclick="event.stopPropagation(); generateFullStory(${index})" id="storyBtn_${index}">
           <span class="spinner"></span><span class="btn-text">📖 Generate Full Story</span>
         </button>
@@ -3398,7 +3487,8 @@ async function callGeminiTTS(text, novel, segmentRaw = null) {
 }
 
 // --- Gemini Imagen: thumbnail/cover generation (when AI provider is Gemini and key set) ---
-async function callGeminiImagen(prompt) {
+// options: { aspectRatio: '3:4' } for novel thumbnail ratio (supported: 1:1, 3:4, 2:3, 9:16, etc.)
+async function callGeminiImagen(prompt, options = {}) {
   const apiKey = getApiKey();
   if (!apiKey) return null;
   const models = [
@@ -3406,6 +3496,13 @@ async function callGeminiImagen(prompt) {
     'gemini-2.0-flash-exp-image-generation',
     'gemini-1.5-pro', // last resort: may not support IMAGE output
   ];
+  const aspectRatio = options.aspectRatio || null;
+  const generationConfig = {
+    responseModalities: ['IMAGE'],
+  };
+  if (aspectRatio) {
+    generationConfig.imageConfig = { aspectRatio };
+  }
   let lastErr = null;
   for (const model of models) {
     try {
@@ -3415,9 +3512,7 @@ async function callGeminiImagen(prompt) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           contents: [{ parts: [{ text: String(prompt).slice(0, 4096) }] }],
-          generationConfig: {
-            responseModalities: ['IMAGE'],
-          },
+          generationConfig,
         }),
       }, 120000);
       if (!response.ok) {
