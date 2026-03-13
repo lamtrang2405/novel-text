@@ -1961,6 +1961,72 @@ async function generateCoversForAllTemplates() {
   showToast('Cover thumbnails ready', 'success');
 }
 
+// --- Thumbnail validation helpers (for 3:4 generation) ---
+function approxEqual(a, b, tolerance = 0.03) {
+  const x = Number(a);
+  const y = Number(b);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
+  return Math.abs(x - y) <= tolerance;
+}
+
+async function readImageSize(dataUrl) {
+  if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/')) {
+    throw new Error('Not an image data URL');
+  }
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve({ width: img.naturalWidth || img.width, height: img.naturalHeight || img.height });
+    img.onerror = () => reject(new Error('Image failed to load'));
+    img.src = dataUrl;
+  });
+}
+
+async function validateThumbnail34DataUrl(dataUrl) {
+  const { width, height } = await readImageSize(dataUrl);
+  const ratio = width && height ? (width / height) : 0;
+  const expected = 3 / 4;
+  const ratioOk = approxEqual(ratio, expected, 0.04);
+  const minSizeOk = width >= 300 && height >= 400;
+  return {
+    ok: Boolean(ratioOk && minSizeOk),
+    width,
+    height,
+    ratio,
+    ratioOk,
+    minSizeOk,
+    expectedRatio: expected,
+  };
+}
+
+function setThumbnail34StatusInCard(index, meta) {
+  const card = document.querySelector(`.novel-card[data-index="${index}"]`);
+  const el = card?.querySelector(`#thumbnail34Status_${index}`);
+  if (!el) return;
+  if (!meta) {
+    el.textContent = 'Not generated yet.';
+    el.dataset.state = 'neutral';
+    return;
+  }
+  if (meta.error) {
+    el.textContent = `Check failed: ${meta.error}`;
+    el.dataset.state = 'bad';
+    return;
+  }
+  const dims = `${meta.width}×${meta.height}`;
+  const ratioTxt = meta.ratio ? meta.ratio.toFixed(3) : 'N/A';
+  if (meta.ok) {
+    el.textContent = `✅ OK — ${dims} (ratio ${ratioTxt} ≈ 3:4)`;
+    el.dataset.state = 'ok';
+  } else {
+    const problems = [
+      meta.ratioOk ? null : `ratio ${ratioTxt} ≠ 3:4`,
+      meta.minSizeOk ? null : 'too small',
+    ].filter(Boolean).join(', ');
+    el.textContent = `⚠️ Warning — ${dims} (${problems})`;
+    el.dataset.state = 'warn';
+  }
+}
+
 // --- Generate novel thumbnail (3:4 ratio) from template ---
 async function generateThumbnail34ForNovel(index) {
   const novel = state.novels?.[index];
@@ -1968,6 +2034,8 @@ async function generateThumbnail34ForNovel(index) {
   const btn = document.getElementById(`generateThumbnail34Btn_${index}`);
   if (btn) { btn.disabled = true; btn.classList.add('loading'); }
   try {
+    novel.thumbnail34Check = null;
+    setThumbnail34StatusInCard(index, null);
     const prompt = buildThumbnail34PromptFromNovel(novel);
     if (getAIProvider() === 'gemini' && getApiKey()) {
       const dataUrl = await callGeminiImagen(prompt, { aspectRatio: '3:4' });
@@ -1977,7 +2045,13 @@ async function generateThumbnail34ForNovel(index) {
         const card = document.querySelector(`.novel-card[data-index="${index}"]`);
         const img = card?.querySelector(`.novel-cover-thumb[data-index="${index}"]`);
         if (img) img.src = dataUrl; else ensureCoverThumbInCard(index);
-        showToast(`Thumbnail (3:4) generated for "${novel.title || 'Novel ' + (index + 1)}"`, 'success');
+        try {
+          novel.thumbnail34Check = await validateThumbnail34DataUrl(dataUrl);
+        } catch (e) {
+          novel.thumbnail34Check = { error: e?.message || String(e) };
+        }
+        setThumbnail34StatusInCard(index, novel.thumbnail34Check);
+        showToast(`Thumbnail generated. Check: ${novel.thumbnail34Check?.ok ? 'OK' : 'Review'}`, novel.thumbnail34Check?.ok ? 'success' : 'info');
       }
     } else {
       const dataUrl = await callImageGenerationAPI(prompt, novel);
@@ -1987,11 +2061,19 @@ async function generateThumbnail34ForNovel(index) {
         const card = document.querySelector(`.novel-card[data-index="${index}"]`);
         const img = card?.querySelector(`.novel-cover-thumb[data-index="${index}"]`);
         if (img) img.src = dataUrl; else ensureCoverThumbInCard(index);
-        showToast(`Thumbnail generated for "${novel.title || 'Novel ' + (index + 1)}" (free API may not be 3:4)`, 'success');
+        try {
+          novel.thumbnail34Check = await validateThumbnail34DataUrl(dataUrl);
+        } catch (e) {
+          novel.thumbnail34Check = { error: e?.message || String(e) };
+        }
+        setThumbnail34StatusInCard(index, novel.thumbnail34Check);
+        showToast(`Thumbnail generated. Check: ${novel.thumbnail34Check?.ok ? 'OK' : 'Review'} (free API may not be 3:4)`, novel.thumbnail34Check?.ok ? 'success' : 'info');
       }
     }
   } catch (e) {
     showToast(`Thumbnail failed: ${e?.message || 'Unknown error'}`, 'error');
+    novel.thumbnail34Check = { error: e?.message || String(e) };
+    setThumbnail34StatusInCard(index, novel.thumbnail34Check);
   }
   if (btn) { btn.disabled = false; btn.classList.remove('loading'); }
 }
@@ -2041,6 +2123,11 @@ function renderResults(novels) {
   // Ensure thumbs persist even when cards rerender
   try {
     novels.forEach((_, i) => ensureCoverThumbInCard(i));
+  } catch (_) {}
+
+  // Populate thumbnail check status
+  try {
+    novels.forEach((n, i) => setThumbnail34StatusInCard(i, n?.thumbnail34Check || null));
   } catch (_) {}
 
   // Expand first card so template content (synopsis, chapter outline, etc.) is visible
@@ -2159,6 +2246,11 @@ function createNovelCard(novel, index) {
       <div class="novel-field">
         <div class="novel-field-label">🖼️ Thumbnail Prompt (paste into Gemini Image)</div>
         <div class="novel-field-content editable" contenteditable="true" data-novel="${index}" data-field="thumbnailPrompt">${escapeHtml(novel.thumbnailPrompt || 'N/A')}</div>
+      </div>
+
+      <div class="novel-field">
+        <div class="novel-field-label">✅ Thumbnail (3:4) Check</div>
+        <div class="novel-field-content" id="thumbnail34Status_${index}" data-state="neutral">Not generated yet.</div>
       </div>
 
       <div class="divider"></div>
