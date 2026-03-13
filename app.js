@@ -1277,6 +1277,13 @@ function getTtsApiKey() {
   return getApiKey();
 }
 
+// --- Get Gemini API key for image generation (used when provider is Gemini or DeepSeek + Gemini key for TTS) ---
+function getGeminiKeyForImages() {
+  if (getAIProvider() === 'gemini') return getApiKey() || '';
+  const geminiTts = document.getElementById('geminiTtsKey')?.value?.trim();
+  return geminiTts || '';
+}
+
 function getTtsApiKeys() {
   if (getTtsProvider() === 'ai33pro') {
     const k = getTtsApiKey();
@@ -2037,38 +2044,21 @@ async function generateThumbnail34ForNovel(index) {
     novel.thumbnail34Check = null;
     setThumbnail34StatusInCard(index, null);
     const prompt = buildThumbnail34PromptFromNovel(novel);
-    if (getAIProvider() === 'gemini' && getApiKey()) {
-      const dataUrl = await callGeminiImagen(prompt, { aspectRatio: '3:4' });
-      if (dataUrl) {
-        novel.thumbnail = dataUrl;
-        novel.cover = dataUrl;
-        const card = document.querySelector(`.novel-card[data-index="${index}"]`);
-        const img = card?.querySelector(`.novel-cover-thumb[data-index="${index}"]`);
-        if (img) img.src = dataUrl; else ensureCoverThumbInCard(index);
-        try {
-          novel.thumbnail34Check = await validateThumbnail34DataUrl(dataUrl);
-        } catch (e) {
-          novel.thumbnail34Check = { error: e?.message || String(e) };
-        }
-        setThumbnail34StatusInCard(index, novel.thumbnail34Check);
-        showToast(`Thumbnail generated. Check: ${novel.thumbnail34Check?.ok ? 'OK' : 'Review'}`, novel.thumbnail34Check?.ok ? 'success' : 'info');
+    const dataUrl = await callImageGenerationAPI(prompt, novel, { aspectRatio: '3:4' });
+    if (dataUrl) {
+      novel.thumbnail = dataUrl;
+      novel.cover = dataUrl;
+      const card = document.querySelector(`.novel-card[data-index="${index}"]`);
+      const img = card?.querySelector(`.novel-cover-thumb[data-index="${index}"]`);
+      if (img) img.src = dataUrl; else ensureCoverThumbInCard(index);
+      try {
+        novel.thumbnail34Check = await validateThumbnail34DataUrl(dataUrl);
+      } catch (e) {
+        novel.thumbnail34Check = { error: e?.message || String(e) };
       }
-    } else {
-      const dataUrl = await callImageGenerationAPI(prompt, novel);
-      if (dataUrl) {
-        novel.thumbnail = dataUrl;
-        novel.cover = dataUrl;
-        const card = document.querySelector(`.novel-card[data-index="${index}"]`);
-        const img = card?.querySelector(`.novel-cover-thumb[data-index="${index}"]`);
-        if (img) img.src = dataUrl; else ensureCoverThumbInCard(index);
-        try {
-          novel.thumbnail34Check = await validateThumbnail34DataUrl(dataUrl);
-        } catch (e) {
-          novel.thumbnail34Check = { error: e?.message || String(e) };
-        }
-        setThumbnail34StatusInCard(index, novel.thumbnail34Check);
-        showToast(`Thumbnail generated. Check: ${novel.thumbnail34Check?.ok ? 'OK' : 'Review'} (free API may not be 3:4)`, novel.thumbnail34Check?.ok ? 'success' : 'info');
-      }
+      setThumbnail34StatusInCard(index, novel.thumbnail34Check);
+      const usedGemini = !!getGeminiKeyForImages();
+      showToast(`Thumbnail generated. Check: ${novel.thumbnail34Check?.ok ? 'OK' : 'Review'}${!usedGemini ? ' (free API may not be 3:4)' : ''}`, novel.thumbnail34Check?.ok ? 'success' : 'info');
     }
   } catch (e) {
     showToast(`Thumbnail failed: ${e?.message || 'Unknown error'}`, 'error');
@@ -3579,9 +3569,9 @@ async function callGeminiTTS(text, novel, segmentRaw = null) {
 }
 
 // --- Gemini Imagen: thumbnail/cover generation (when AI provider is Gemini and key set) ---
-// options: { aspectRatio: '3:4' } for novel thumbnail ratio (supported: 1:1, 3:4, 2:3, 9:16, etc.)
+// options: { aspectRatio: '3:4' } for novel thumbnail ratio; { apiKeyOverride } to use a specific key (e.g. when provider is DeepSeek)
 async function callGeminiImagen(prompt, options = {}) {
-  const apiKey = getApiKey();
+  const apiKey = options.apiKeyOverride || getApiKey();
   if (!apiKey) return null;
   const models = [
     'gemini-2.5-flash-image-preview',
@@ -3695,8 +3685,9 @@ async function callFreeImageAPI(prompt, novel) {
   });
 }
 
-// --- Unified image generation: Gemini Imagen when provider is Gemini + key; else free API (DeepSeek has no image API) ---
-async function callImageGenerationAPI(prompt, novel) {
+// --- Unified image generation: Gemini Imagen when a Gemini key is available (Gemini or DeepSeek + Gemini key); else free API ---
+// genOptions: { aspectRatio: '3:4' } for novel thumbnails. DeepSeek has no image API; we use Gemini key from Settings (Gemini key for TTS) when provider is DeepSeek.
+async function callImageGenerationAPI(prompt, novel, genOptions = {}) {
   const fullPrompt = `Book cover illustration for a novel. No text, no typography, no watermark.
 Title concept: "${novel?.title || 'Untitled'}".
 Genre: ${novel?.genre || novel?.category || 'Fiction'}.
@@ -3704,12 +3695,19 @@ Setting/background: ${novel?.background || 'not specified'}.
 Main mood/tone: ${novel?.narratorTone || ''}.
 Composition: centered subject, cinematic lighting, high detail, professional cover art.`;
   const effectivePrompt = prompt && prompt.length > 50 ? prompt : fullPrompt;
-  if (getAIProvider() === 'gemini' && getApiKey()) {
+  const geminiKey = getGeminiKeyForImages();
+  if (geminiKey) {
     try {
-      return await callGeminiImagen(effectivePrompt);
+      return await callGeminiImagen(effectivePrompt, {
+        aspectRatio: genOptions.aspectRatio || null,
+        apiKeyOverride: geminiKey,
+      });
     } catch (e) {
       console.warn('Gemini Imagen failed, falling back to free API:', e?.message);
     }
+  }
+  if (getAIProvider() === 'deepseek' && !geminiKey) {
+    throw new Error('Image generation requires a Gemini API key. In Settings, add a "Gemini Key (for TTS when using DeepSeek)" to use Gemini for thumbnails while using DeepSeek for text.');
   }
   return callFreeImageAPI(effectivePrompt, novel);
 }
