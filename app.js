@@ -455,7 +455,8 @@ function stampCollectionAndCategoriesFromForm(novels) {
       if (!novel.genre) novel.genre = cateogories;
     }
     if (formAuthor) novel.authorName = formAuthor;
-    else if (!safeStr(novel.authorName)) novel.authorName = 'Anonymous';
+    else if (!safeStr(novel.authorName) || /^(unknown author|anonymous|example author)$/i.test(safeStr(novel.authorName)))
+      novel.authorName = pickRandomAuthorName();
     if (!safeStr(novel.premium)) novel.premium = 'yes';
     if (!safeStr(novel.show)) novel.show = 'yes';
   });
@@ -477,7 +478,10 @@ function normalizeNovelsForExport(novels) {
         { chapterNumber: 1, title: 'Chapter 1', summary: novel.synopsis ? novel.synopsis.substring(0, 200) + (novel.synopsis.length > 200 ? '…' : '') : 'Opening.' }
       ];
     }
-    if (!safeStr(novel.authorName)) novel.authorName = safeStr(document.getElementById('authorName')?.value) || 'Anonymous';
+    const formAuthor = safeStr(document.getElementById('authorName')?.value);
+    if (formAuthor) novel.authorName = formAuthor;
+    else if (!safeStr(novel.authorName) || /^(unknown author|anonymous|example author)$/i.test(safeStr(novel.authorName)))
+      novel.authorName = pickRandomAuthorName();
     if (!safeStr(novel.premium)) novel.premium = 'yes';
     if (!safeStr(novel.show)) novel.show = 'yes';
     if (!safeStr(novel.collection)) novel.collection = safeStr(document.getElementById('collectionName')?.value);
@@ -660,6 +664,18 @@ const ALLOWED_CATEGORIES = [
   'MM Romance',
   'Sci-Fi',
   'War',
+  'Emotional Realism',
+  'Vampire',
+  'Campus',
+  'Imagination',
+  'Rebirth',
+  'Steamy',
+  'Folklore Mystery',
+  'Male POV',
+  'New Adult',
+  'Paranormal Urban',
+  'Action',
+  'Chicklit',
   'Other',
 ];
 
@@ -686,6 +702,18 @@ function normalizeCategoryName(raw) {
   if (lower.includes('history') || lower.includes('historical')) return 'History';
   if (lower.includes('war') || lower.includes('military')) return 'War';
   if (lower.includes('eastern') || lower.includes('wuxia') || lower.includes('xianxia') || lower.includes('china') || lower.includes('korea') || lower.includes('japan')) return 'Eastern';
+  if (lower.includes('vampire')) return 'Vampire';
+  if (lower.includes('campus') || lower.includes('college') || lower.includes('university')) return 'Campus';
+  if (lower.includes('rebirth') || lower.includes('reincarnation') || lower.includes('transmigration')) return 'Rebirth';
+  if (lower.includes('steamy') || lower.includes('spicy') || lower.includes('explicit')) return 'Steamy';
+  if (lower.includes('folklore') && lower.includes('mystery')) return 'Folklore Mystery';
+  if (lower.includes('male pov') || lower.includes('male point of view')) return 'Male POV';
+  if (lower.includes('emotional realism')) return 'Emotional Realism';
+  if (lower.includes('imagination')) return 'Imagination';
+  if (lower.includes('new adult')) return 'New Adult';
+  if (lower.includes('paranormal urban')) return 'Paranormal Urban';
+  if (lower.includes('action')) return 'Action';
+  if (lower.includes('chicklit') || lower.includes('chick lit')) return 'Chicklit';
   return 'Other';
 }
 
@@ -706,11 +734,28 @@ function limitWords(s, maxWords) {
   return words.slice(0, Math.max(1, maxWords)).join(' ');
 }
 
+// Reject vague/nonsense tag patterns (e.g. "corruption of", "identity vs", "X of", "X vs Y").
+function isMeaningfulTag(tag) {
+  const s = safeStr(tag).trim();
+  if (s.length < 2) return false;
+  const lower = s.toLowerCase();
+  // Drop phrases ending in " of", " vs", " versus" (incomplete/vague).
+  if (/\s+(of|vs\.?|versus)\s*$/.test(lower)) return false;
+  // Drop "X of Y" or "X vs Y" when they're generic (only 2–3 words and contain of/vs).
+  if (/^.+\s+(of|vs\.?|versus)\s+.+$/.test(lower) && s.split(/\s+/).length <= 3) return false;
+  // Drop very generic standalone words that add no meaning.
+  const skip = new Set(['the', 'and', 'or', 'vs', 'versus', 'of']);
+  const words = lower.split(/\s+/).filter(Boolean);
+  if (words.length === 1 && skip.has(words[0])) return false;
+  return true;
+}
+
 function normalizeTagList(list) {
   const out = (Array.isArray(list) ? list : [])
     .map(t => limitWords(t, 2))
     .map(t => t.replace(/[|—–-]+/g, ' ').replace(/\s+/g, ' ').trim())
-    .filter(Boolean);
+    .filter(Boolean)
+    .filter(isMeaningfulTag);
   const seen = new Set();
   return out.filter(t => {
     const k = t.toLowerCase();
@@ -718,6 +763,16 @@ function normalizeTagList(list) {
     seen.add(k);
     return true;
   });
+}
+
+// Random author name when none provided (avoid Unknown Author / Anonymous).
+const RANDOM_FIRST = ['Emma', 'Marcus', 'Sofia', 'James', 'Luna', 'Alex', 'Mia', 'Leo', 'Zara', 'Noah', 'Ella', 'Finn', 'Ivy', 'Owen', 'Ruby', 'Cole', 'Lily', 'Jake', 'Nina', 'Kai'];
+const RANDOM_LAST = ['Vance', 'Webb', 'Cross', 'Reed', 'Blake', 'Hart', 'Shaw', 'Gray', 'Wells', 'Fox', 'Brooks', 'Stone', 'Lane', 'Cole', 'Hayes', 'Marsh', 'Kent', 'Burns', 'Ford', 'Page'];
+
+function pickRandomAuthorName() {
+  const first = RANDOM_FIRST[Math.floor(Math.random() * RANDOM_FIRST.length)];
+  const last = RANDOM_LAST[Math.floor(Math.random() * RANDOM_LAST.length)];
+  return `${first} ${last}`;
 }
 
 function getExportCollection() {
@@ -1403,10 +1458,10 @@ function buildGeminiPrompt(formData) {
     prompt += `\n**Reference Text (use as style/content inspiration):**\n${formData.referenceText.substring(0, 5000)}`;
   }
   if (formData.collectionName) {
-    prompt += `\n**Collection (Tên Danh Mục):** ${formData.collectionName}`;
+    prompt += `\n**Collection:** ${formData.collectionName}`;
   }
   if (formData.cateogoriesName) {
-    prompt += `\n**Cateogories (Tên Thể Loại):** ${formData.cateogoriesName}`;
+    prompt += `\n**Categories:** ${formData.cateogoriesName}`;
   }
 
   prompt += `
@@ -1418,13 +1473,13 @@ Generate exactly ${formData.numNovels} novel templates. Each novel template MUST
 2. **synopsis** — A SINGLE short hook line, maximum 100 characters (including spaces). No newlines.
 3. **draftScript** — The core scenario, script outline, and key ideas the story conveys
 4. **characters** — An array of characters, each with: name, role (protagonist/antagonist/supporting), age, description, arc (character development summary), gender ("male" or "female" for voice casting)
-5. **authorName** — "${formData.authorName}"
+5. **authorName** — ${formData.authorName ? `"${formData.authorName}"` : 'Generate a random, plausible author pen name for each novel (e.g. Emma Vance, Marcus Webb). Each novel must have a different author name. Do NOT use "Unknown Author" or "Anonymous".'}
 6. **releaseDate** — "${formData.releaseDate}"
 7. **narratorTone** — Description of the narrative voice, POV, and tone
 8. **background** — The world/setting description and backdrop of the story
 9. **writingLanguage** — "${formData.writingLanguage}"
 10. **chapters** — An array of 5-10 chapter outlines, each with: chapterNumber, title, summary (SHORT). CRITICAL: For each chapter, the combined string "${'title'} — ${'summary'}" must be <= 100 characters.
-11. **themes** — Array of core themes explored in the novel
+11. **themes** — Array of 3–6 short, meaningful theme words or two-word phrases (e.g. redemption, first love, war trauma, family bonds, betrayal, survival). Use concrete terms only. Do NOT use vague phrases like "corruption of", "identity vs", "good vs evil", or "X of Y".
 12. **genre** — Primary and secondary genres
 13. **category** — MUST be exactly ONE of: ${ALLOWED_CATEGORIES.map(c => `"${c}"`).join(', ')} (no extra text)
 14. **collection** — "${formData.collectionName || ''}"
