@@ -790,10 +790,18 @@ function getCategoriesForExport(novel) {
 }
 
 function getTagsForExport(novel) {
-  if (Array.isArray(novel?.themes) && novel.themes.length) return normalizeTagList(novel.themes).join(', ');
   if (Array.isArray(novel?.tags) && novel.tags.length) return normalizeTagList(novel.tags).join(', ');
+  if (Array.isArray(novel?.themes) && novel.themes.length) return normalizeTagList(novel.themes).join(', ');
   const single = safeStr(novel?.tag);
   return single ? normalizeTagList([single]).join(', ') : '';
+}
+
+/** Comma-separated tags for card display / editing */
+function getTagsDisplayText(novel) {
+  if (Array.isArray(novel?.tags) && novel.tags.length) return normalizeTagList(novel.tags).join(', ');
+  if (Array.isArray(novel?.themes) && novel.themes.length) return normalizeTagList(novel.themes).join(', ');
+  const single = safeStr(novel?.tag);
+  return single || 'N/A';
 }
 
 /** Chapter outline as plain text (for export columns): "Ch1: Title — Summary\nCh2: ..." */
@@ -2153,11 +2161,7 @@ function createNovelCard(novel, index) {
     `).join('');
   }
 
-  // Themes HTML
-  let themesHtml = '';
-  if (novel.themes && Array.isArray(novel.themes)) {
-    themesHtml = novel.themes.map(t => `<span class="theme-tag">${t}</span>`).join(' · ');
-  }
+  const tagsDisplay = getTagsDisplayText(novel);
 
   const isReviewed = state.reviewedNovels.has(index);
   const coverThumb = (typeof novel?.thumbnail === 'string' && novel.thumbnail.startsWith('data:image/'))
@@ -2191,13 +2195,18 @@ function createNovelCard(novel, index) {
       <div class="edit-hint">💡 Click any text field below to edit it</div>
 
       <div class="novel-field">
-        <div class="novel-field-label">📖 Genre & Themes</div>
-        <div class="novel-field-content editable" contenteditable="true" data-novel="${index}" data-field="genre">${escapeHtml(novel.genre || 'N/A')}${themesHtml ? ' | ' + themesHtml : ''}</div>
+        <div class="novel-field-label">📖 Genre</div>
+        <div class="novel-field-content editable" contenteditable="true" data-novel="${index}" data-field="genre">${escapeHtml(novel.genre || 'N/A')}</div>
       </div>
 
       <div class="novel-field">
         <div class="novel-field-label">📂 Category</div>
         <div class="novel-field-content editable" contenteditable="true" data-novel="${index}" data-field="category">${escapeHtml(novel.category || 'N/A')}</div>
+      </div>
+
+      <div class="novel-field">
+        <div class="novel-field-label">🏷️ Tags</div>
+        <div class="novel-field-content editable" contenteditable="true" data-novel="${index}" data-field="tags" data-placeholder="Comma-separated tags">${escapeHtml(tagsDisplay)}</div>
       </div>
 
       <div class="divider"></div>
@@ -2395,7 +2404,17 @@ function attachEditSyncListeners(container) {
     const value = el.textContent?.trim() || '';
 
     if (field) {
-      state.novels[novelIndex][field] = value;
+      if (field === 'tags') {
+        const raw = value === 'N/A' ? '' : value;
+        const list = raw
+          ? normalizeTagList(raw.split(/[,|;]|\n/).map(t => t.trim()).filter(Boolean))
+          : [];
+        state.novels[novelIndex].tags = list;
+        state.novels[novelIndex].themes = list.slice();
+        state.novels[novelIndex].tag = list.length ? list.join(', ') : '';
+      } else {
+        state.novels[novelIndex][field] = value;
+      }
       if (field === 'title') {
         const titleEl = container.querySelector(`.novel-card[data-index="${novelIndex}"] .novel-card-header .novel-title`);
         if (titleEl && titleEl !== el) titleEl.textContent = value || 'Untitled Novel';
