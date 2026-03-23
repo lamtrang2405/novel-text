@@ -303,6 +303,14 @@ function initApp() {
   document.getElementById('generateThumbnails34AllBtn')?.addEventListener('click', generateThumbnails34ForAll);
   document.getElementById('generateAllStoriesBtn')?.addEventListener('click', handleGenerateAllStories);
   document.getElementById('fillMissingDataBtn')?.addEventListener('click', handleFillMissingData);
+  document.getElementById('downloadAllBtn')?.addEventListener('click', () => {
+    if (!state.novels.length) {
+      showToast('No novels to download', 'error');
+      return;
+    }
+    showToast(`Downloading ${state.novels.length} template .txt file(s)… Allow multiple downloads if your browser asks.`, 'info');
+    handleDownloadAll();
+  });
 
   // Download templates: dropdown (All as .txt | Export CSV | Export XLSX)
   const downloadTemplatesBtn = document.getElementById('downloadTemplatesBtn');
@@ -1029,7 +1037,7 @@ async function handleExportCsv() {
       rows.forEach(row => lines.push(row.map(csvEscape).join(',')));
     }
     const csv = lines.join('\r\n');
-    downloadBlob(new Blob([csv], { type: 'text/csv;charset=utf-8' }), 'novels_export.csv');
+    downloadBlob(new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' }), 'novels_export.csv');
     showToast('Exported CSV (use Export package .zip for image files)', 'success');
   } catch (e) {
     console.error('CSV export failed', e);
@@ -1092,7 +1100,7 @@ async function handleExportZipPackage() {
       `);
     }
 
-    zip.file('templates.csv', csvLines.join('\r\n'));
+    zip.file('templates.csv', '\uFEFF' + csvLines.join('\r\n'));
     zip.file('gallery.html', `<!doctype html>
 <html>
 <head>
