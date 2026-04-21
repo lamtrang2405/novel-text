@@ -470,6 +470,10 @@ function initApp() {
       downloadTemplatesDropdown.classList.remove('open');
       handleExportXlsx();
     });
+    document.getElementById('downloadExportXlsxFitBtn')?.addEventListener('click', () => {
+      downloadTemplatesDropdown.classList.remove('open');
+      handleExportXlsx({ fitColumns: true });
+    });
     document.getElementById('downloadExportZipBtn')?.addEventListener('click', () => {
       downloadTemplatesDropdown.classList.remove('open');
       handleExportZipPackage();
@@ -1539,7 +1543,32 @@ async function handleExportZipPackage() {
   }
 }
 
-async function handleExportXlsx() {
+function getExcelCellText(value) {
+  if (value == null) return '';
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (value.richText && Array.isArray(value.richText)) {
+    return value.richText.map((part) => part?.text || '').join('');
+  }
+  if (value.text) return String(value.text);
+  if (value.result != null) return String(value.result);
+  return String(value);
+}
+
+function autoFitWorksheetColumns(ws, minWidth = 12, maxWidth = 80) {
+  if (!ws || !Array.isArray(ws.columns)) return;
+  ws.columns.forEach((col) => {
+    let maxLen = minWidth;
+    col.eachCell({ includeEmpty: true }, (cell) => {
+      const text = getExcelCellText(cell?.value).replace(/\r?\n/g, ' ');
+      if (!text) return;
+      if (text.length > maxLen) maxLen = text.length;
+    });
+    col.width = Math.max(minWidth, Math.min(maxWidth, maxLen + 2));
+  });
+}
+
+async function handleExportXlsx(options = {}) {
+  const { fitColumns = false } = options || {};
   try {
     const flow = ensureActiveFlow();
     if (!Array.isArray(flow.novels) || !flow.novels.length) {
@@ -1588,9 +1617,15 @@ async function handleExportXlsx() {
     }
 
     ws.views = [{ state: 'frozen', ySplit: 1 }];
+    if (fitColumns) {
+      autoFitWorksheetColumns(ws, 10, 80);
+    }
     const buf = await wb.xlsx.writeBuffer();
-    downloadBlob(new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), 'novels_export.xlsx');
-    showToast('Exported XLSX', 'success');
+    downloadBlob(
+      new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }),
+      fitColumns ? 'novels_export_fit_columns.xlsx' : 'novels_export.xlsx'
+    );
+    showToast(fitColumns ? 'Exported XLSX (fit columns)' : 'Exported XLSX', 'success');
   } catch (e) {
     console.error('XLSX export failed', e);
     showToast('XLSX export failed: ' + (e?.message || String(e)), 'error');
