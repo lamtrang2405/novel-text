@@ -425,7 +425,18 @@ function initApp() {
       localStorage.setItem('auto_generate_stories_after_templates', e.target.checked ? '1' : '0');
     });
   }
-  document.getElementById('loadExampleBtn')?.addEventListener('click', loadExampleTemplates);
+  const loadExampleBtn = document.getElementById('loadExampleBtn');
+  if (loadExampleBtn) {
+    // Keep both bindings so the action still works if one listener path is disrupted.
+    loadExampleBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      loadExampleTemplates();
+    });
+    loadExampleBtn.onclick = (e) => {
+      e.preventDefault();
+      loadExampleTemplates();
+    };
+  }
   document.getElementById('testApiBtn')?.addEventListener('click', handleTestApi);
   document.getElementById('generateThumbnails34AllBtn')?.addEventListener('click', generateThumbnails34ForAll);
   document.getElementById('generateAllStoriesBtn')?.addEventListener('click', handleGenerateAllStories);
@@ -942,67 +953,75 @@ She went back to Vermont once, after the trial. The estate was empty. She stood 
 }
 
 function loadExampleTemplates() {
-  const fid = newFlowId();
-  state.flows[fid] = createFlowState(fid, 'Example templates');
-  state.activeFlowId = fid;
-  const flow = getFlow(fid);
-  flow.novels = getExampleTemplates();
-  normalizeNovelsForExport(flow.novels);
-  stampCollectionAndCategoriesFromForm(flow.novels);
-  applyAutoReviewTemplateToNovels(flow.novels);
-  flow.stories = {};
-  flow.novels.forEach((_, index) => {
-    const sample = getExampleFullStory(index);
-    if (sample) flow.stories[index] = sample;
-  });
-  ensureFlowPanelDom(fid);
-  renderFlowTabs();
-  switchToFlow(fid);
-  const fd = flowDomId(fid);
-  const section = document.getElementById('resultsSection');
-  const countEl = document.getElementById('resultsCount');
-  const container = document.getElementById(`novelsContainer_${fd}`);
-  if (!section || !container) return;
-  section.classList.add('active');
-  if (countEl) countEl.textContent = `${flow.novels.length} example templates`;
-  container.innerHTML = '';
-  flow.novels.forEach((novel, index) => {
-    const card = createNovelCard(novel, index, fid);
-    card.style.animationDelay = `${index * 0.1}s`;
-    container.appendChild(card);
-  });
-  attachEditSyncListeners(container, fid);
-  flow.novels.forEach((_, index) => {
-    const storyText = flow.stories[index];
-    if (storyText) {
-      const storySection = document.getElementById(`storySection_${fd}_${index}`);
-      const storyContent = document.getElementById(`storyContent_${fd}_${index}`);
-      if (storySection && storyContent) {
-        renderStoryChapters(fid, index, storyText);
-        storySection.style.display = 'block';
-      }
-      const storyBtn = document.getElementById(`storyBtn_${fd}_${index}`);
-      if (storyBtn) storyBtn.innerHTML = '<span class="btn-text">✅ Story Generated</span>';
+  try {
+    const fid = newFlowId();
+    state.flows[fid] = createFlowState(fid, 'Example templates');
+    state.activeFlowId = fid;
+    const flow = getFlow(fid);
+    flow.novels = getExampleTemplates();
+    normalizeNovelsForExport(flow.novels);
+    stampCollectionAndCategoriesFromForm(flow.novels);
+    applyAutoReviewTemplateToNovels(flow.novels);
+    flow.stories = {};
+    flow.novels.forEach((_, index) => {
+      const sample = getExampleFullStory(index);
+      if (sample) flow.stories[index] = sample;
+    });
+    ensureFlowPanelDom(fid);
+    renderFlowTabs();
+    switchToFlow(fid);
+    const fd = flowDomId(fid);
+    const section = document.getElementById('resultsSection');
+    const countEl = document.getElementById('resultsCount');
+    const container = document.getElementById(`novelsContainer_${fd}`);
+    if (!section || !container) {
+      showToast('Could not render examples. Please refresh and try again.', 'error');
+      return;
     }
-  });
-  const firstCard = container?.querySelector('.novel-card');
-  if (firstCard) firstCard.classList.add('expanded');
-  section.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  void (async () => {
-    for (let i = 0; i < flow.novels.length; i++) {
-      if (!flow.stories[i]) continue;
-      try {
-        await runAutoReviewStoryStep(fid, i, null);
-      } catch (e) {
-        console.warn('Example auto-review story', i, e);
+    section.classList.add('active');
+    if (countEl) countEl.textContent = `${flow.novels.length} example templates`;
+    container.innerHTML = '';
+    flow.novels.forEach((novel, index) => {
+      const card = createNovelCard(novel, index, fid);
+      card.style.animationDelay = `${index * 0.1}s`;
+      container.appendChild(card);
+    });
+    attachEditSyncListeners(container, fid);
+    flow.novels.forEach((_, index) => {
+      const storyText = flow.stories[index];
+      if (storyText) {
+        const storySection = document.getElementById(`storySection_${fd}_${index}`);
+        const storyContent = document.getElementById(`storyContent_${fd}_${index}`);
+        if (storySection && storyContent) {
+          renderStoryChapters(fid, index, storyText);
+          storySection.style.display = 'block';
+        }
+        const storyBtn = document.getElementById(`storyBtn_${fd}_${index}`);
+        if (storyBtn) storyBtn.innerHTML = '<span class="btn-text">✅ Story Generated</span>';
       }
+    });
+    const firstCard = container?.querySelector('.novel-card');
+    if (firstCard) firstCard.classList.add('expanded');
+    section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    void (async () => {
+      for (let i = 0; i < flow.novels.length; i++) {
+        if (!flow.stories[i]) continue;
+        try {
+          await runAutoReviewStoryStep(fid, i, null);
+        } catch (e) {
+          console.warn('Example auto-review story', i, e);
+        }
+      }
+    })();
+    if (canGenerateImages()) {
+      showToast('Example templates loaded. Generating thumbnails…', 'success');
+      generateCoversForAllTemplates(fid);
+    } else {
+      showToast('Example templates loaded. Configure image generation to create thumbnails.', 'success');
     }
-  })();
-  if (canGenerateImages()) {
-    showToast('Example templates loaded. Generating thumbnails…', 'success');
-    generateCoversForAllTemplates(fid);
-  } else {
-    showToast('Example templates loaded. Configure image generation to create thumbnails.', 'success');
+  } catch (e) {
+    console.error('Load example failed:', e);
+    showToast('Load example failed: ' + (e?.message || 'Unknown error'), 'error');
   }
 }
 
