@@ -192,6 +192,19 @@ function injectUiStyles() {
 
 // --- DOM Ready ---
 document.addEventListener('DOMContentLoaded', () => {
+  // Early fallback binding so "Load example" still works even if initApp throws later.
+  const earlyLoadExampleBtn = document.getElementById('loadExampleBtn');
+  if (earlyLoadExampleBtn && !earlyLoadExampleBtn.dataset.boundFallback) {
+    earlyLoadExampleBtn.dataset.boundFallback = '1';
+    earlyLoadExampleBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      try {
+        loadExampleTemplates();
+      } catch (err) {
+        console.error('Early load example handler failed:', err);
+      }
+    });
+  }
   try {
     initApp();
   } catch (e) {
