@@ -3,7 +3,8 @@
    Gemini API Integration & Novel Generation
    ============================================ */
 
-// --- State (per-run data lives in state.flows[flowId]) ---
+// --- State (single run) ---
+const SINGLE_FLOW_ID = 'main';
 const state = {
   apiKey: '',
   flows: Object.create(null),
@@ -15,7 +16,7 @@ const state = {
 };
 
 function newFlowId() {
-  return 'flow_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 10);
+  return SINGLE_FLOW_ID;
 }
 
 function flowDomId(flowId) {
@@ -49,12 +50,11 @@ function getActiveFlow() {
 }
 
 function ensureActiveFlow() {
-  if (!state.activeFlowId || !state.flows[state.activeFlowId]) {
-    const id = newFlowId();
-    state.flows[id] = createFlowState(id, 'Run 1');
-    state.activeFlowId = id;
+  if (!state.flows[SINGLE_FLOW_ID]) {
+    state.flows[SINGLE_FLOW_ID] = createFlowState(SINGLE_FLOW_ID, 'Current run');
   }
-  return state.flows[state.activeFlowId];
+  state.activeFlowId = SINGLE_FLOW_ID;
+  return state.flows[SINGLE_FLOW_ID];
 }
 
 function ensureFlowPanelDom(flowId) {
@@ -74,12 +74,11 @@ function ensureFlowPanelDom(flowId) {
 }
 
 function switchToFlow(flowId) {
-  if (!getFlow(flowId)) return;
-  state.activeFlowId = flowId;
+  const targetId = getFlow(flowId) ? flowId : SINGLE_FLOW_ID;
+  state.activeFlowId = targetId;
   document.querySelectorAll('.flow-panel').forEach((p) => {
-    p.hidden = p.dataset.flowId !== flowId;
+    p.hidden = p.dataset.flowId !== targetId;
   });
-  renderFlowTabs();
   refreshGenerateButtonState();
   updateResultsHeaderCount();
 }
@@ -91,23 +90,7 @@ function updateResultsHeaderCount() {
 }
 
 function renderFlowTabs() {
-  const bar = document.getElementById('flowTabsBar');
-  if (!bar) return;
-  const ids = Object.keys(state.flows);
-  const escAttr = (s) => String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
-  bar.innerHTML = ids.map((fid) => {
-    const f = state.flows[fid];
-    const active = fid === state.activeFlowId;
-    const label = String(f.label || fid).replace(/</g, '');
-    const busy = f.generating ? ' …' : '';
-    return `<button type="button" class="flow-tab${active ? ' active' : ''}" data-flow-id="${escAttr(fid)}" title="${escAttr(label)}">${label}${busy}</button>`;
-  }).join('');
-  bar.querySelectorAll('[data-flow-id]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const fid = btn.getAttribute('data-flow-id');
-      if (fid) switchToFlow(fid);
-    });
-  });
+  // Single-flow mode: tabs are removed from UI.
 }
 
 function refreshGenerateButtonState() {
@@ -295,19 +278,23 @@ function renderHistoryList() {
       const id = btn.getAttribute('data-history-load');
       const run = loadHistoryRuns().find(x => x.id === id);
       if (!run || !Array.isArray(run.novels)) return;
-      const fid = newFlowId();
-      state.flows[fid] = createFlowState(fid, safeStr(run.masterPrompt).slice(0, 40) || 'History');
-      state.activeFlowId = fid;
-      const flow = getFlow(fid);
+      const flow = ensureActiveFlow();
+      flow.label = safeStr(run.masterPrompt).slice(0, 40) || 'History';
       flow.novels = run.novels;
+      flow.stories = {};
+      flow.audioScripts = {};
+      flow.audioScriptSegments = {};
+      flow.generatedAudio = {};
+      flow.generatedAudioBatches = {};
+      flow.generatedScenes = {};
+      flow.reviewedNovels = new Set();
       normalizeNovelsForExport(flow.novels);
       stampCollectionAndCategoriesFromForm(flow.novels);
       applyAutoReviewTemplateToNovels(flow.novels);
-      ensureFlowPanelDom(fid);
-      renderFlowTabs();
-      switchToFlow(fid);
-      renderFlowResults(fid);
-      showToast('Loaded history run into a new tab.', 'success');
+      ensureFlowPanelDom(flow.id);
+      switchToFlow(flow.id);
+      renderFlowResults(flow.id);
+      showToast('Loaded history run.', 'success');
       closeHistory();
     });
   });
@@ -426,10 +413,8 @@ function initApp() {
   // Event listeners
   const genBtn = document.getElementById('generateBtn');
   if (genBtn) genBtn.addEventListener('click', handleGenerate);
-  document.getElementById('newParallelRunBtn')?.addEventListener('click', handleNewParallelRun);
   ensureActiveFlow();
   ensureFlowPanelDom(state.activeFlowId);
-  renderFlowTabs();
   switchToFlow(state.activeFlowId);
   const autoStoryChk = document.getElementById('autoGenerateStoriesAfterTemplates');
   if (autoStoryChk) {
@@ -967,10 +952,9 @@ She went back to Vermont once, after the trial. The estate was empty. She stood 
 
 function loadExampleTemplates() {
   try {
-    const fid = newFlowId();
-    state.flows[fid] = createFlowState(fid, 'Example templates');
-    state.activeFlowId = fid;
-    const flow = getFlow(fid);
+    const flow = ensureActiveFlow();
+    flow.label = 'Example templates';
+    const fid = flow.id;
     flow.novels = getExampleTemplates();
     normalizeNovelsForExport(flow.novels);
     stampCollectionAndCategoriesFromForm(flow.novels);
@@ -981,7 +965,6 @@ function loadExampleTemplates() {
       if (sample) flow.stories[index] = sample;
     });
     ensureFlowPanelDom(fid);
-    renderFlowTabs();
     switchToFlow(fid);
     const fd = flowDomId(fid);
     const section = document.getElementById('resultsSection');
@@ -2428,15 +2411,8 @@ async function handleGenerate() {
 }
 
 async function handleNewParallelRun() {
-  if (!validateForm()) return;
-  const formData = collectFormData();
-  const id = newFlowId();
-  state.flows[id] = createFlowState(id, flowLabelFromPrompt(formData.masterPrompt));
-  state.activeFlowId = id;
-  ensureFlowPanelDom(id);
-  renderFlowTabs();
-  switchToFlow(id);
-  await runFlowGenerate(id);
+  // Parallel run flow was removed; keep compatibility by triggering normal generation.
+  await handleGenerate();
 }
 
 async function runFlowGenerate(flowId) {
