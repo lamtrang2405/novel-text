@@ -3,22 +3,126 @@
    Gemini API Integration & Novel Generation
    ============================================ */
 
-// --- State ---
+// --- State (per-run data lives in state.flows[flowId]) ---
 const state = {
   apiKey: '',
-  novels: [],
-  stories: {},
-  audioScripts: {}, // raw text for download
-  audioScriptSegments: {}, // { [index]: string[] } - editable segments for each novel
-  generatedAudio: {}, // { [novelIndex]: { [segmentIndex]: blobUrl } | { batch_0_4: blobUrl } }
-  generatedAudioBatches: {}, // { [novelIndex]: { batchKey: [indices] } } for batch playback
-  generatedScenes: {}, // { [novelIndex]: { [segmentIndex]: imageDataUrl } }
-  reviewedNovels: new Set(), // indices of templates marked "passed manual review"
-  isGenerating: false,
-  speakingSegment: null, // { audioIndex, segmentIndex } - for stopping TTS
+  flows: Object.create(null),
+  activeFlowId: null,
+  speakingSegment: null, // { audioIndex, segmentIndex, flowId } - for stopping TTS
+  ttsDemoPlayback: null, // { audio: HTMLAudioElement, url: string } — Settings voice preview
   imageGenerationDisabled: false,
   imageGenerationDisabledReason: '',
 };
+
+function newFlowId() {
+  return 'flow_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 10);
+}
+
+function flowDomId(flowId) {
+  return String(flowId || 'flow').replace(/[^a-zA-Z0-9_-]/g, '_');
+}
+
+function createFlowState(id, label) {
+  return {
+    id,
+    label: label || 'Untitled run',
+    novels: [],
+    stories: {},
+    audioScripts: {},
+    audioScriptSegments: {},
+    generatedAudio: {},
+    generatedAudioBatches: {},
+    generatedScenes: {},
+    reviewedNovels: new Set(),
+    generating: false,
+    status: 'idle',
+    errorMessage: '',
+  };
+}
+
+function getFlow(fid) {
+  return fid ? state.flows[fid] : null;
+}
+
+function getActiveFlow() {
+  return state.activeFlowId ? state.flows[state.activeFlowId] : null;
+}
+
+function ensureActiveFlow() {
+  if (!state.activeFlowId || !state.flows[state.activeFlowId]) {
+    const id = newFlowId();
+    state.flows[id] = createFlowState(id, 'Run 1');
+    state.activeFlowId = id;
+  }
+  return state.flows[state.activeFlowId];
+}
+
+function ensureFlowPanelDom(flowId) {
+  const wrap = document.getElementById('flowPanelsContainer');
+  if (!wrap || !flowId) return;
+  const fd = flowDomId(flowId);
+  if (document.getElementById(`flowPanel_${fd}`)) return;
+  const panel = document.createElement('div');
+  panel.className = 'flow-panel';
+  panel.id = `flowPanel_${fd}`;
+  panel.dataset.flowId = flowId;
+  panel.hidden = true;
+  const inner = document.createElement('div');
+  inner.id = `novelsContainer_${fd}`;
+  panel.appendChild(inner);
+  wrap.appendChild(panel);
+}
+
+function switchToFlow(flowId) {
+  if (!getFlow(flowId)) return;
+  state.activeFlowId = flowId;
+  document.querySelectorAll('.flow-panel').forEach((p) => {
+    p.hidden = p.dataset.flowId !== flowId;
+  });
+  renderFlowTabs();
+  refreshGenerateButtonState();
+  updateResultsHeaderCount();
+}
+
+function updateResultsHeaderCount() {
+  const flow = getActiveFlow();
+  const countEl = document.getElementById('resultsCount');
+  if (countEl && flow) countEl.textContent = `${flow.novels.length} novels generated`;
+}
+
+function renderFlowTabs() {
+  const bar = document.getElementById('flowTabsBar');
+  if (!bar) return;
+  const ids = Object.keys(state.flows);
+  const escAttr = (s) => String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+  bar.innerHTML = ids.map((fid) => {
+    const f = state.flows[fid];
+    const active = fid === state.activeFlowId;
+    const label = String(f.label || fid).replace(/</g, '');
+    const busy = f.generating ? ' …' : '';
+    return `<button type="button" class="flow-tab${active ? ' active' : ''}" data-flow-id="${escAttr(fid)}" title="${escAttr(label)}">${label}${busy}</button>`;
+  }).join('');
+  bar.querySelectorAll('[data-flow-id]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const fid = btn.getAttribute('data-flow-id');
+      if (fid) switchToFlow(fid);
+    });
+  });
+}
+
+function refreshGenerateButtonState() {
+  const flow = getActiveFlow();
+  const btn = document.getElementById('generateBtn');
+  if (!btn) return;
+  const busy = !!flow?.generating;
+  btn.disabled = busy;
+  btn.classList.toggle('loading', busy);
+}
+
+function setFlowStatusLine(text) {
+  const el = document.getElementById('flowStatusLine');
+  if (el) el.textContent = text || '';
+}
 
 function canGenerateImages() {
   // Gemini image generation: always allow when provider is Gemini and key is set (Imagen).
@@ -115,7 +219,7 @@ function saveHistoryRuns(runs) {
   } catch (_) {}
 }
 
-function addHistoryRun(formData, novels) {
+function addHistoryRun(formData, novels, flowId = null) {
   if (!Array.isArray(novels) || !novels.length) return;
   const now = new Date();
   const run = {
@@ -125,6 +229,8 @@ function addHistoryRun(formData, novels) {
     numNovels: novels.length,
     masterPrompt: safeStr(formData?.masterPrompt).slice(0, 220),
     novels,
+    flowId: flowId || undefined,
+    flowLabel: flowId && getFlow(flowId) ? getFlow(flowId).label : undefined,
   };
   const runs = loadHistoryRuns();
   runs.unshift(run);
@@ -176,11 +282,19 @@ function renderHistoryList() {
       const id = btn.getAttribute('data-history-load');
       const run = loadHistoryRuns().find(x => x.id === id);
       if (!run || !Array.isArray(run.novels)) return;
-      state.novels = run.novels;
-      normalizeNovelsForExport(state.novels);
-      stampCollectionAndCategoriesFromForm(state.novels);
-      renderResults(state.novels);
-      showToast('Loaded history run into results.', 'success');
+      const fid = newFlowId();
+      state.flows[fid] = createFlowState(fid, safeStr(run.masterPrompt).slice(0, 40) || 'History');
+      state.activeFlowId = fid;
+      const flow = getFlow(fid);
+      flow.novels = run.novels;
+      normalizeNovelsForExport(flow.novels);
+      stampCollectionAndCategoriesFromForm(flow.novels);
+      applyAutoReviewTemplateToNovels(flow.novels);
+      ensureFlowPanelDom(fid);
+      renderFlowTabs();
+      switchToFlow(fid);
+      renderFlowResults(fid);
+      showToast('Loaded history run into a new tab.', 'success');
       closeHistory();
     });
   });
@@ -233,6 +347,7 @@ function initApp() {
     const saved = localStorage.getItem(id);
     if (saved && el) el.value = saved;
     el?.addEventListener('change', (e) => localStorage.setItem(id, e.target.value));
+    document.getElementById(`demoVoice_${id}`)?.addEventListener('click', () => playTtsVoiceDemo(id));
   });
 
   // Settings modal
@@ -298,17 +413,30 @@ function initApp() {
   // Event listeners
   const genBtn = document.getElementById('generateBtn');
   if (genBtn) genBtn.addEventListener('click', handleGenerate);
+  document.getElementById('newParallelRunBtn')?.addEventListener('click', handleNewParallelRun);
+  ensureActiveFlow();
+  ensureFlowPanelDom(state.activeFlowId);
+  renderFlowTabs();
+  switchToFlow(state.activeFlowId);
+  const autoStoryChk = document.getElementById('autoGenerateStoriesAfterTemplates');
+  if (autoStoryChk) {
+    autoStoryChk.checked = localStorage.getItem('auto_generate_stories_after_templates') === '1';
+    autoStoryChk.addEventListener('change', (e) => {
+      localStorage.setItem('auto_generate_stories_after_templates', e.target.checked ? '1' : '0');
+    });
+  }
   document.getElementById('loadExampleBtn')?.addEventListener('click', loadExampleTemplates);
   document.getElementById('testApiBtn')?.addEventListener('click', handleTestApi);
   document.getElementById('generateThumbnails34AllBtn')?.addEventListener('click', generateThumbnails34ForAll);
   document.getElementById('generateAllStoriesBtn')?.addEventListener('click', handleGenerateAllStories);
   document.getElementById('fillMissingDataBtn')?.addEventListener('click', handleFillMissingData);
   document.getElementById('downloadAllBtn')?.addEventListener('click', () => {
-    if (!state.novels.length) {
+    const flow = ensureActiveFlow();
+    if (!flow.novels.length) {
       showToast('No novels to download', 'error');
       return;
     }
-    showToast(`Downloading ${state.novels.length} template .txt file(s)… Allow multiple downloads if your browser asks.`, 'info');
+    showToast(`Downloading ${flow.novels.length} template .txt file(s)… Allow multiple downloads if your browser asks.`, 'info');
     handleDownloadAll();
   });
 
@@ -397,7 +525,8 @@ function getExampleTemplates() {
   return [
     {
       title: 'Shadows of the Empathic Order',
-      synopsis: 'In a world where emotions manifest as physical powers, a young woman discovers she can absorb others\' pain—and their memories. When the Empathic Order recruits her to hunt a rogue empath, she must choose between duty and the truth behind the war that shattered her family.',
+      synopsis: 'An empath hunts a rogue—then learns the Order she serves may have started the war.',
+      overview: 'In a world where emotions manifest as physical powers, a young woman discovers she can absorb others\' pain—and their memories. When the Empathic Order recruits her to hunt a rogue empath, she must choose between duty and the truth behind the war that shattered her family. Each mission pulls her deeper into a cover-up that redefines who the enemy really is.',
       draftScript: 'Dark fantasy. Protagonist has empathy-based power. Conflict: Order vs Void Syndicate. Themes: trauma, healing, belonging.',
       characters: [
         { name: 'Elara', role: 'protagonist', age: '22', description: 'Empath who absorbs pain and memories.', arc: 'From hiding her power to leading a reckoning.', gender: 'female' },
@@ -423,7 +552,8 @@ function getExampleTemplates() {
     },
     {
       title: 'Midnight at the Inkwell',
-      synopsis: 'A ghostwriter for a reclusive celebrity novelist uncovers a real murder tied to the author\'s past. To finish the book and stay alive, she must piece together the story from coded manuscripts and dangerous interviews.',
+      synopsis: 'A ghostwriter decodes a star author\'s manuscript—and finds a real murder in the margins.',
+      overview: 'A ghostwriter for a reclusive celebrity novelist uncovers a real murder tied to the author\'s past. To finish the book and stay alive, she must piece together the story from coded manuscripts and dangerous interviews. Every chapter she writes brings her closer to a confession that someone will kill to keep buried.',
       draftScript: 'Mystery thriller. Ghostwriter protagonist. Celebrity author with a secret. Murder plot mirrors the novel-in-progress.',
       characters: [
         { name: 'Maya', role: 'protagonist', age: '28', description: 'Ghostwriter, sharp and observant.', arc: 'From outsider to confronting the past.', gender: 'female' },
@@ -476,15 +606,25 @@ function normalizeNovelsForExport(novels) {
   if (!Array.isArray(novels)) return;
   novels.forEach(novel => {
     if (!novel || typeof novel !== 'object') return;
-    const synopsis = safeStr(novel.synopsis);
-    if (!synopsis || synopsis === 'N/A') {
-      novel.synopsis = safeStr(novel.draftScript) || (novel.title ? `A story: ${novel.title}.` : 'No synopsis yet.');
+    const rawSyn0 = safeStr(novel.synopsis);
+    let ov = safeStr(novel.overview);
+    if (!ov || ov === 'N/A') {
+      if (rawSyn0.length > 100) ov = rawSyn0;
+      else ov = safeStr(novel.draftScript).slice(0, 1800) || rawSyn0 || (novel.title ? `A story: ${novel.title}.` : 'No overview yet.');
     }
-    // Enforce app-level synopsis constraint (short hook line).
-    novel.synopsis = clampText(novel.synopsis, 100);
+    novel.overview = clampText(ov, 2000);
+
+    let hook = rawSyn0;
+    if (!hook || hook === 'N/A') hook = novel.overview;
+    if (safeStr(hook).length > 100) {
+      const parts = safeStr(hook).split(/(?<=[.!?])\s+/);
+      hook = (parts[0] || safeStr(hook).slice(0, 100)).trim();
+    }
+    novel.synopsis = clampText(hook, 100);
     if (!novel.chapters || !Array.isArray(novel.chapters) || novel.chapters.length === 0) {
+      const seed = safeStr(novel.overview) || safeStr(novel.synopsis);
       novel.chapters = [
-        { chapterNumber: 1, title: 'Chapter 1', summary: novel.synopsis ? novel.synopsis.substring(0, 200) + (novel.synopsis.length > 200 ? '…' : '') : 'Opening.' }
+        { chapterNumber: 1, title: 'Chapter 1', summary: seed ? seed.substring(0, 200) + (seed.length > 200 ? '…' : '') : 'Opening.' }
       ];
     }
     const formAuthor = safeStr(document.getElementById('authorName')?.value);
@@ -518,6 +658,215 @@ function normalizeNovelsForExport(novels) {
       });
     }
   });
+}
+
+/** Dedupe / normalize character rows so names, roles, and genders stay consistent across the template. */
+function synchronizeCharacterSystem(novel) {
+  if (!novel || typeof novel !== 'object') return;
+  const raw = Array.isArray(novel.characters) ? novel.characters : [];
+  const byLower = new Map();
+  const normRole = (r) => {
+    const s = safeStr(r).toLowerCase();
+    if (s.includes('protagonist') || s === 'main' || s.includes('lead')) return 'protagonist';
+    if (s.includes('antagonist') || s.includes('villain')) return 'antagonist';
+    return 'supporting';
+  };
+  const normGender = (g) => {
+    const s = safeStr(g).toLowerCase();
+    if (s === 'male' || s === 'm') return 'male';
+    if (s === 'female' || s === 'f') return 'female';
+    return 'female';
+  };
+  for (const c of raw) {
+    if (!c || typeof c !== 'object') continue;
+    const name = safeStr(c.name).trim();
+    if (!name) continue;
+    const key = name.toLowerCase();
+    const merged = {
+      name,
+      role: normRole(c.role),
+      age: safeStr(c.age) || '',
+      description: safeStr(c.description) || '',
+      arc: safeStr(c.arc) || '',
+      gender: normGender(c.gender),
+    };
+    if (byLower.has(key)) {
+      const prev = byLower.get(key);
+      if (merged.description.length > prev.description.length) prev.description = merged.description;
+      if (merged.arc.length > prev.arc.length) prev.arc = merged.arc;
+      if (!prev.age && merged.age) prev.age = merged.age;
+      continue;
+    }
+    byLower.set(key, merged);
+  }
+  const order = { protagonist: 0, antagonist: 1, supporting: 2 };
+  novel.characters = [...byLower.values()].sort(
+    (a, b) => (order[a.role] ?? 9) - (order[b.role] ?? 9) || a.name.localeCompare(b.name),
+  );
+}
+
+function validateTemplateForAutoReview(novel) {
+  const issues = [];
+  if (!novel || typeof novel !== 'object') return { ok: false, issues: ['Invalid novel'], synced: true };
+  const chars = novel.characters;
+  if (!Array.isArray(chars) || chars.length < 2) {
+    issues.push('Character system should list at least two characters for voice/export consistency.');
+  }
+  const seen = new Set();
+  (chars || []).forEach((c) => {
+    const n = safeStr(c?.name).trim();
+    if (!n) {
+      issues.push('A character entry is missing a name.');
+      return;
+    }
+    const k = n.toLowerCase();
+    if (seen.has(k)) issues.push(`Duplicate character name: "${n}".`);
+    seen.add(k);
+    if (!safeStr(c.description)) issues.push(`Character "${n}" has no description.`);
+  });
+  if (!safeStr(novel.draftScript) || novel.draftScript === 'N/A') {
+    issues.push('Draft script / core ideas is empty.');
+  }
+  if (!Array.isArray(novel.chapters) || novel.chapters.length < 2) {
+    issues.push('Chapter outline should have at least two chapters.');
+  }
+  const ov = safeStr(novel.overview);
+  if (!ov || ov === 'N/A' || ov.length < 120) {
+    issues.push('Overview should be a full-meaning summary (aim for 300+ characters).');
+  }
+  return { ok: issues.length === 0, issues, synced: true };
+}
+
+function applyAutoReviewTemplateToNovels(novels) {
+  if (!Array.isArray(novels)) return;
+  novels.forEach((novel) => {
+    if (!novel || typeof novel !== 'object') return;
+    synchronizeCharacterSystem(novel);
+    novel._autoReview = novel._autoReview || {};
+    novel._autoReview.template = validateTemplateForAutoReview(novel);
+  });
+}
+
+function formatAutoReviewIssuesHtml(issues) {
+  if (!issues || !issues.length) return '<span class="auto-review-ok">No issues flagged.</span>';
+  return `<ul class="auto-review-issues">${issues.map((x) => `<li>${escapeHtml(x)}</li>`).join('')}</ul>`;
+}
+
+function validateStoryAgainstTemplateProgrammatic(flowId, index) {
+  const flow = getFlow(flowId);
+  if (!flow) return { ok: false, issues: ['Missing flow'] };
+  const novel = flow.novels[index];
+  const storyText = safeStr(flow.stories[index]);
+  const issues = [];
+  if (!novel) return { ok: false, issues: ['Missing template'] };
+  if (!storyText || storyText.length < 400) {
+    issues.push('Story text is missing or too short.');
+    return { ok: false, issues };
+  }
+  const outline = novel.chapters || [];
+  const expectedN = outline.filter((c) => parseInt(c?.chapterNumber, 10) >= 1).length;
+  const parsed = parseChaptersFromMarkers(storyText);
+  if (expectedN > 0 && parsed.length > 0 && parsed.length !== expectedN) {
+    issues.push(
+      `Chapter count mismatch: full story has ${parsed.length} [CHAPTER] block(s); template outline has ${expectedN}.`,
+    );
+  }
+  const names = (novel.characters || []).map((c) => safeStr(c.name).trim()).filter(Boolean);
+  const lower = storyText.toLowerCase();
+  names.forEach((fullName) => {
+    const tokens = fullName.split(/\s+/).filter((t) => t.length > 1);
+    const hit = tokens.some((t) => lower.includes(t.toLowerCase()));
+    if (!hit) issues.push(`Character "${fullName}" may be absent from the prose — verify manually.`);
+  });
+  return { ok: issues.length === 0, issues };
+}
+
+async function callStoryAlignmentReviewLLM(novel, storyText, apiKeyOverride) {
+  const outline = (novel.chapters || [])
+    .map((ch) => `Ch${ch.chapterNumber}: ${safeStr(ch.title)} — ${safeStr(ch.summary)}`)
+    .join('\n');
+  const chars = (novel.characters || [])
+    .map((c) => `${safeStr(c.name)} (${safeStr(c.role)}): ${safeStr(c.description)}`)
+    .join('\n');
+  const excerpt = storyText.slice(0, 16000);
+  const prompt = `You are a quality-control editor. Compare the story excerpt to the novel template.
+
+Return JSON ONLY with this shape:
+{"aligned":boolean,"character_sync_ok":boolean,"issues":string[],"summary":string}
+
+Rules:
+- "aligned" true if the story follows the same premise, setting, and chapter intent as the outline.
+- "character_sync_ok" true if all listed characters appear to be the same people as in the template (names/roles).
+- "issues" max 6 short strings; empty if none.
+- "summary" one sentence.
+
+Title: ${safeStr(novel.title)}
+Overview: ${safeStr(novel.overview || novel.synopsis)}
+Outline:
+${outline}
+
+Character system:
+${chars || '(none)'}
+
+Story excerpt:
+${excerpt}`;
+
+  if (getAIProvider() === 'deepseek') {
+    return callDeepSeekAPI(prompt, true);
+  }
+  if (!apiKeyOverride && !getApiKey()) throw new Error('No API key for alignment review');
+  return callGeminiAPIWithKey(prompt, apiKeyOverride, {
+    temperature: 0.15,
+    maxOutputTokens: 1200,
+    responseMimeType: 'application/json',
+  });
+}
+
+async function runAutoReviewStoryStep(flowId, index, apiKeyOverride) {
+  const flow = getFlow(flowId);
+  if (!flow) return;
+  const novel = flow.novels[index];
+  const storyText = flow.stories[index];
+  if (!novel || !storyText) return;
+  const prog = validateStoryAgainstTemplateProgrammatic(flowId, index);
+  let llm = null;
+  try {
+    if (getApiKey()) {
+      llm = await callStoryAlignmentReviewLLM(novel, storyText, apiKeyOverride);
+    }
+  } catch (e) {
+    llm = { qc_error: safeStr(e?.message || e) };
+  }
+  const llmIssues = llm && !llm.qc_error && Array.isArray(llm.issues) ? llm.issues : [];
+  const mergedIssues = [...(prog.issues || []), ...llmIssues];
+  if (llm && llm.qc_error) mergedIssues.push(`Alignment review API: ${llm.qc_error}`);
+  const llmPass =
+    !llm || llm.qc_error
+      ? true
+      : llm.aligned !== false && llm.character_sync_ok !== false;
+  novel._autoReview = novel._autoReview || {};
+  novel._autoReview.story = {
+    ok: prog.ok && llmPass && mergedIssues.length === 0,
+    programmatic: prog,
+    llm,
+    issues: mergedIssues,
+    summary: llm && safeStr(llm.summary),
+    at: Date.now(),
+  };
+  const fd = flowDomId(flowId);
+  const el = document.getElementById(`autoReviewStory_${fd}_${index}`);
+  if (el) {
+    const st = novel._autoReview.story;
+    const qcErr = llm && llm.qc_error ? `<p class="auto-review-warn">${escapeHtml(llm.qc_error)}</p>` : '';
+    el.className = `auto-review-banner ${st.ok ? 'ok' : 'warn'}`;
+    el.innerHTML = `
+      <div class="auto-review-title">🔍 Auto-review (full story vs template)</div>
+      ${qcErr}
+      ${st.summary ? `<p class="auto-review-summary">${escapeHtml(st.summary)}</p>` : ''}
+      ${formatAutoReviewIssuesHtml(st.issues)}
+    `;
+    el.style.display = 'block';
+  }
 }
 
 function getExampleFullStory(index) {
@@ -593,48 +942,65 @@ She went back to Vermont once, after the trial. The estate was empty. She stood 
 }
 
 function loadExampleTemplates() {
-  state.novels = getExampleTemplates();
-  normalizeNovelsForExport(state.novels);
-  stampCollectionAndCategoriesFromForm(state.novels);
-  // Pre-fill sample full stories so export shows chapter_outline and full_story columns with content
-  state.stories = {};
-  state.novels.forEach((_, index) => {
+  const fid = newFlowId();
+  state.flows[fid] = createFlowState(fid, 'Example templates');
+  state.activeFlowId = fid;
+  const flow = getFlow(fid);
+  flow.novels = getExampleTemplates();
+  normalizeNovelsForExport(flow.novels);
+  stampCollectionAndCategoriesFromForm(flow.novels);
+  applyAutoReviewTemplateToNovels(flow.novels);
+  flow.stories = {};
+  flow.novels.forEach((_, index) => {
     const sample = getExampleFullStory(index);
-    if (sample) state.stories[index] = sample;
+    if (sample) flow.stories[index] = sample;
   });
+  ensureFlowPanelDom(fid);
+  renderFlowTabs();
+  switchToFlow(fid);
+  const fd = flowDomId(fid);
   const section = document.getElementById('resultsSection');
   const countEl = document.getElementById('resultsCount');
-  const container = document.getElementById('novelsContainer');
+  const container = document.getElementById(`novelsContainer_${fd}`);
   if (!section || !container) return;
   section.classList.add('active');
-  if (countEl) countEl.textContent = `${state.novels.length} example templates`;
+  if (countEl) countEl.textContent = `${flow.novels.length} example templates`;
   container.innerHTML = '';
-  state.novels.forEach((novel, index) => {
-    const card = createNovelCard(novel, index);
+  flow.novels.forEach((novel, index) => {
+    const card = createNovelCard(novel, index, fid);
     card.style.animationDelay = `${index * 0.1}s`;
     container.appendChild(card);
   });
-  attachEditSyncListeners(container);
-  // Show full story in cards so the new columns are visible in UI and in export
-  state.novels.forEach((_, index) => {
-    const storyText = state.stories[index];
+  attachEditSyncListeners(container, fid);
+  flow.novels.forEach((_, index) => {
+    const storyText = flow.stories[index];
     if (storyText) {
-      const storySection = document.getElementById(`storySection_${index}`);
-      const storyContent = document.getElementById(`storyContent_${index}`);
+      const storySection = document.getElementById(`storySection_${fd}_${index}`);
+      const storyContent = document.getElementById(`storyContent_${fd}_${index}`);
       if (storySection && storyContent) {
-        renderStoryChapters(index, storyText);
+        renderStoryChapters(fid, index, storyText);
         storySection.style.display = 'block';
       }
-      const storyBtn = document.getElementById(`storyBtn_${index}`);
+      const storyBtn = document.getElementById(`storyBtn_${fd}_${index}`);
       if (storyBtn) storyBtn.innerHTML = '<span class="btn-text">✅ Story Generated</span>';
     }
   });
   const firstCard = container?.querySelector('.novel-card');
   if (firstCard) firstCard.classList.add('expanded');
   section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  void (async () => {
+    for (let i = 0; i < flow.novels.length; i++) {
+      if (!flow.stories[i]) continue;
+      try {
+        await runAutoReviewStoryStep(fid, i, null);
+      } catch (e) {
+        console.warn('Example auto-review story', i, e);
+      }
+    }
+  })();
   if (canGenerateImages()) {
     showToast('Example templates loaded. Generating thumbnails…', 'success');
-    generateCoversForAllTemplates();
+    generateCoversForAllTemplates(fid);
   } else {
     showToast('Example templates loaded. Configure image generation to create thumbnails.', 'success');
   }
@@ -646,6 +1012,12 @@ function safeStr(v) {
   if (Array.isArray(v)) return v.map(safeStr).filter(Boolean).join(', ');
   if (typeof v === 'object') return '';
   return String(v).trim();
+}
+
+function flowLabelFromPrompt(masterPrompt) {
+  const s = safeStr(masterPrompt).replace(/\s+/g, ' ').trim();
+  if (!s) return 'New run';
+  return s.length > 42 ? s.slice(0, 40) + '…' : s;
 }
 
 function clampText(s, maxChars) {
@@ -821,17 +1193,21 @@ function getChapterOutlineText(novel) {
 }
 
 /** Full story text for a novel (from DOM or state), for export and template .txt */
-function getFullStoryText(index) {
-  const contentEl = document.getElementById(`storyContent_${index}`);
+function getFullStoryText(flowId, index) {
+  const fd = flowDomId(flowId);
+  const contentEl = document.getElementById(`storyContent_${fd}_${index}`);
   const fromDom = contentEl?.textContent?.trim();
   if (fromDom) return fromDom;
-  return safeStr(state.stories[index]);
+  const flow = getFlow(flowId);
+  return safeStr(flow?.stories[index]);
 }
 
 /** Parsed chapters with full content for export. Uses story with [CHAPTER N] markers when available for accurate split. */
-function getFullStoryChaptersForExport(index) {
-  const rawFromState = safeStr(state.stories[index]);
-  const fromDom = document.getElementById(`storyContent_${index}`)?.textContent?.trim();
+function getFullStoryChaptersForExport(flowId, index) {
+  const flow = getFlow(flowId);
+  const rawFromState = safeStr(flow?.stories[index]);
+  const fd = flowDomId(flowId);
+  const fromDom = document.getElementById(`storyContent_${fd}_${index}`)?.textContent?.trim();
   const textToParse = rawFromState || fromDom || '';
   let chapters = parseChaptersFromMarkers(textToParse);
   if (!chapters.length && textToParse) {
@@ -840,13 +1216,13 @@ function getFullStoryChaptersForExport(index) {
   return chapters;
 }
 
-function storyIsCompleteForNovel(index, novel) {
+function storyIsCompleteForNovel(flowId, index, novel) {
   if (!novel || typeof novel !== 'object') return false;
   const expected = (Array.isArray(novel.chapters) ? novel.chapters : [])
     .map(c => parseInt(c?.chapterNumber, 10))
     .filter(n => !Number.isNaN(n) && n >= 1);
   if (!expected.length) return false;
-  const parsed = getFullStoryChaptersForExport(index);
+  const parsed = getFullStoryChaptersForExport(flowId, index);
   const contentByNum = new Map(parsed.map(ch => [parseInt(ch.number, 10), safeStr(ch.content)]));
   // Require every expected chapter number to exist and have some prose.
   return expected.every(n => {
@@ -870,9 +1246,9 @@ const EXPORT_HEADERS = [
 ];
 
 /** Build one row per chapter for a novel. Each row has same novel metadata + one chapter_outline and chapter_content. */
-function buildExportRowsForNovel(novelIndex, novel, collection) {
+function buildExportRowsForNovel(flowId, novelIndex, novel, collection) {
   const templateChapters = novel?.chapters || [];
-  const storyChapters = getFullStoryChaptersForExport(novelIndex);
+  const storyChapters = getFullStoryChaptersForExport(flowId, novelIndex);
   const outlineByNum = {};
   templateChapters.forEach(ch => {
     // Export expects only the episode/chapter title (no summary/detail).
@@ -887,7 +1263,7 @@ function buildExportRowsForNovel(novelIndex, novel, collection) {
   const allNums = [...new Set([...Object.keys(outlineByNum).map(Number), ...Object.keys(contentByNum).map(Number)])].sort((a, b) => a - b);
   const rows = [];
   const title = safeStr(novel.title);
-  const description = clampText(safeStr(novel.synopsis), 100);
+  const description = clampText(safeStr(novel.overview || novel.synopsis), 500);
   const premiumStatus = safeStr(novel.premiumStatus || novel.premium) || 'yes';
   const tags = getTagsForExport(novel);
   const categoryNames = getCategoriesForExport(novel);
@@ -970,10 +1346,11 @@ function resizeDataUrl(dataUrl, maxW, maxH, outType = 'image/png') {
   });
 }
 
-function pickCoverDataUrl(novelIndex, novel) {
+function pickCoverDataUrl(flowId, novelIndex, novel) {
   const maybe = novel?.cover || novel?.coverImage || novel?.image || novel?.thumbnail;
   if (typeof maybe === 'string' && maybe.startsWith('data:image/')) return maybe;
-  const scenes = state.generatedScenes?.[novelIndex];
+  const flow = getFlow(flowId);
+  const scenes = flow?.generatedScenes?.[novelIndex];
   if (!scenes) return '';
   const keys = Object.keys(scenes)
     .map(k => parseInt(k, 10))
@@ -984,11 +1361,11 @@ function pickCoverDataUrl(novelIndex, novel) {
   return (typeof first === 'string' && first.startsWith('data:image/')) ? first : '';
 }
 
-function pickThumbnailDataUrl(novelIndex, novel) {
+function pickThumbnailDataUrl(flowId, novelIndex, novel) {
   const maybe = novel?.thumbnail || novel?.thumb || novel?.cover;
   if (typeof maybe === 'string' && maybe.startsWith('data:image/')) return maybe;
   // Fall back to cover/scenes-derived image if present.
-  return pickCoverDataUrl(novelIndex, novel);
+  return pickCoverDataUrl(flowId, novelIndex, novel);
 }
 
 // Ensure legacy callers (inline handlers / older exports) can always access it.
@@ -996,7 +1373,8 @@ try { window.pickThumbnailDataUrl = pickThumbnailDataUrl; } catch (_) {}
 
 /** Before export: ensure every novel has cover + thumbnail so thumbnail/cover columns are filled. */
 async function ensureThumbnailsForExport() {
-  const novels = state.novels || [];
+  const flow = ensureActiveFlow();
+  const novels = flow.novels || [];
   if (!Array.isArray(novels) || !novels.length) return;
   if (!canGenerateImages()) {
     // Ensure prompt fallback exists even without images
@@ -1008,32 +1386,45 @@ async function ensureThumbnailsForExport() {
     .map((n, i) => (typeof n?.cover === 'string' && n.cover.startsWith('data:image/')) ? -1 : i)
     .filter(i => i >= 0);
   if (!missing.length) return;
-  showToast(`Generating ${missing.length} missing thumbnail(s)…`, 'info');
-  for (const i of missing) {
-    try {
-      await generateCoverForNovel(i);
-    } catch (e) {
-      console.warn('Thumbnail generation failed for novel', i, e);
-      showToast(`Thumbnail generation failed for novel ${i + 1}: ${e?.message || 'Unknown error'}`, 'error');
+  showToast(`Generating ${missing.length} missing thumbnail(s) in parallel…`, 'info');
+  const queue = missing.slice();
+  const concurrency = Math.min(4, queue.length);
+  let done = 0;
+  const total = missing.length;
+  const fid = state.activeFlowId;
+  const worker = async () => {
+    while (queue.length) {
+      const i = queue.shift();
+      if (i == null) break;
+      try {
+        await generateCoverForNovel(fid, i);
+        done++;
+      } catch (e) {
+        console.warn('Thumbnail generation failed for novel', i, e);
+        showToast(`Thumbnail generation failed for novel ${i + 1}: ${e?.message || 'Unknown error'}`, 'error');
+      }
+      await new Promise(r => setTimeout(r, 60));
     }
-    await new Promise(r => setTimeout(r, 200));
-  }
-  showToast('Thumbnails ready for export', 'success');
+  };
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
+  showToast(`Thumbnails ready for export (${done}/${total}).`, 'success');
 }
 
 // --- Export: CSV / XLSX ---
 async function handleExportCsv() {
   try {
-    if (!Array.isArray(state.novels) || !state.novels.length) {
+    const flow = ensureActiveFlow();
+    if (!Array.isArray(flow.novels) || !flow.novels.length) {
       showToast('Nothing to export yet. Generate novel templates first.', 'error');
       return;
     }
-    normalizeNovelsForExport(state.novels);
+    const flowId = state.activeFlowId;
+    normalizeNovelsForExport(flow.novels);
     const collection = getExportCollection();
     const lines = [EXPORT_HEADERS.map(csvEscape).join(',')];
-    for (let i = 0; i < state.novels.length; i++) {
-      const novel = state.novels[i] || {};
-      const rows = buildExportRowsForNovel(i, novel, collection);
+    for (let i = 0; i < flow.novels.length; i++) {
+      const novel = flow.novels[i] || {};
+      const rows = buildExportRowsForNovel(flowId, i, novel, collection);
       rows.forEach(row => lines.push(row.map(csvEscape).join(',')));
     }
     const csv = lines.join('\r\n');
@@ -1047,20 +1438,21 @@ async function handleExportCsv() {
 
 async function handleExportZipPackage() {
   try {
-    if (!Array.isArray(state.novels) || !state.novels.length) {
+    const flow = ensureActiveFlow();
+    if (!Array.isArray(flow.novels) || !flow.novels.length) {
       showToast('Nothing to export yet. Generate novel templates first.', 'error');
       return;
     }
-    normalizeNovelsForExport(state.novels);
+    const flowId = state.activeFlowId;
+    normalizeNovelsForExport(flow.novels);
     if (!window.JSZip) {
       showToast('ZIP export library failed to load. Reload and try again.', 'error');
       return;
     }
     await ensureThumbnailsForExport();
 
-    // Ensure we have thumbnails for each cover.
-    for (let i = 0; i < state.novels.length; i++) {
-      const novel = state.novels[i] || {};
+    for (let i = 0; i < flow.novels.length; i++) {
+      const novel = flow.novels[i] || {};
       if (!novel.thumbnail && novel.cover) {
         novel.thumbnail = await resizeDataUrl(novel.cover, 128, 128, 'image/png');
       }
@@ -1070,15 +1462,14 @@ async function handleExportZipPackage() {
     const thumbs = zip.folder('thumbnails');
     const covers = zip.folder('covers');
 
-    // CSV (one row per chapter, same format as Export CSV)
     const collection = getExportCollection();
     const csvLines = [EXPORT_HEADERS.map(csvEscape).join(',')];
 
     const galleryCards = [];
 
-    for (let i = 0; i < state.novels.length; i++) {
-      const novel = state.novels[i] || {};
-      const coverDataUrl = pickCoverDataUrl(i, novel);
+    for (let i = 0; i < flow.novels.length; i++) {
+      const novel = flow.novels[i] || {};
+      const coverDataUrl = pickCoverDataUrl(flowId, i, novel);
       const thumbDataUrl = novel.thumbnail || (coverDataUrl ? await resizeDataUrl(coverDataUrl, 128, 128, 'image/png') : '');
 
       const coverPng = coverDataUrl ? await fetch(coverDataUrl).then(r => r.blob()) : null;
@@ -1089,12 +1480,12 @@ async function handleExportZipPackage() {
       if (coverPng) covers.file(coverName, coverPng);
       if (thumbPng) thumbs.file(thumbName, thumbPng);
 
-      const rows = buildExportRowsForNovel(i, novel, collection);
+      const rows = buildExportRowsForNovel(flowId, i, novel, collection);
       rows.forEach(row => csvLines.push(row.map(csvEscape).join(',')));
 
       galleryCards.push(`
-        <a class="card" href="${coverPath}" target="_blank" rel="noopener">
-          <img src="${thumbPath}" alt="${escapeHtml(safeStr(novel.title) || ('Novel ' + (i + 1)))}"/>
+        <a class="card" href="covers/${coverName}" target="_blank" rel="noopener">
+          <img src="thumbnails/${thumbName}" alt="${escapeHtml(safeStr(novel.title) || ('Novel ' + (i + 1)))}"/>
           <div class="t">${escapeHtml(safeStr(novel.title) || ('Novel ' + (i + 1)))}</div>
         </a>
       `);
@@ -1135,11 +1526,13 @@ async function handleExportZipPackage() {
 
 async function handleExportXlsx() {
   try {
-    if (!Array.isArray(state.novels) || !state.novels.length) {
+    const flow = ensureActiveFlow();
+    if (!Array.isArray(flow.novels) || !flow.novels.length) {
       showToast('Nothing to export yet. Generate novel templates first.', 'error');
       return;
     }
-    normalizeNovelsForExport(state.novels);
+    const flowId = state.activeFlowId;
+    normalizeNovelsForExport(flow.novels);
     if (!window.ExcelJS) {
       showToast('XLSX export library failed to load. Reload and try again.', 'error');
       return;
@@ -1157,9 +1550,9 @@ async function handleExportXlsx() {
     ws.getRow(1).height = 20;
 
     let rowNumber = 2;
-    for (let i = 0; i < state.novels.length; i++) {
-      const novel = state.novels[i] || {};
-      const rows = buildExportRowsForNovel(i, novel, collection);
+    for (let i = 0; i < flow.novels.length; i++) {
+      const novel = flow.novels[i] || {};
+      const rows = buildExportRowsForNovel(flowId, i, novel, collection);
       rows.forEach(row => {
         ws.addRow({
           title: row[0],
@@ -1311,6 +1704,116 @@ function getTtsApiKeys() {
   return keys.length ? keys : (getAIProvider() === 'gemini' ? getApiKeys() : []);
 }
 
+function ttsKeyMissingMessage() {
+  return getTtsProvider() === 'ai33pro'
+    ? 'Add your AI33 Pro API key under Audio Generation → AI33 Pro API Key in Settings.'
+    : 'Add a Gemini TTS API key (or your main Gemini key) under Audio Generation in Settings.';
+}
+
+/** Allowed voice IDs for AI casting (must match Settings optgroups per TTS provider). */
+function getTtsVoiceOptionsForAi() {
+  if (getTtsProvider() === 'ai33pro') {
+    return {
+      narrator: ['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer'],
+      female: ['nova', 'shimmer'],
+      male: ['onyx', 'alloy'],
+    };
+  }
+  return {
+    narrator: ['Charon', 'Schedar', 'Sulafat', 'Kore', 'Puck', 'Orus'],
+    female: ['Sulafat', 'Kore', 'Zephyr'],
+    male: ['Charon', 'Puck', 'Orus'],
+  };
+}
+
+function pickValidTtsVoice(value, allowed) {
+  const v = String(value || '').trim().toLowerCase();
+  const hit = allowed.find(a => a.toLowerCase() === v);
+  return hit || allowed[0];
+}
+
+function applyTtsVoicesToSettingsUI(tv) {
+  if (!tv || typeof tv !== 'object') return;
+  const pairs = [
+    ['narratorVoice', tv.narratorVoice],
+    ['femaleVoice', tv.femaleVoice],
+    ['maleVoice', tv.maleVoice],
+  ];
+  pairs.forEach(([id, val]) => {
+    const el = document.getElementById(id);
+    if (!el || !val) return;
+    const ok = [...el.options].some(o => o.value === val);
+    if (ok) {
+      el.value = val;
+      localStorage.setItem(id, val);
+    }
+  });
+}
+
+/** AI-picks narrator + female + male TTS voices from narrator tone, background, and character cast. */
+async function suggestTtsVoicesFromTemplate(flowId, novelIndex) {
+  const flow = getFlow(flowId);
+  const novel = flow?.novels?.[novelIndex];
+  if (!novel) {
+    showToast('No novel template found.', 'error');
+    return;
+  }
+  const fd = flowDomId(flowId);
+  if (!getApiKey()) {
+    showToast('Add your text API key in Settings (API Key field) so AI can suggest voices.', 'error');
+    return;
+  }
+  const opts = getTtsVoiceOptionsForAi();
+  const charSummary = (novel.characters || []).map(c =>
+    `${safeStr(c.name)}${c.gender ? ` (${c.gender})` : ''}${c.role ? ` — ${c.role}` : ''}`
+  ).join('; ') || 'Unknown cast — infer from tone only.';
+  const prompt = `You are casting text-to-speech voices for a novel audio drama.
+
+Novel template:
+- Title: ${safeStr(novel.title)}
+- Genre / category: ${safeStr(novel.genre || novel.category)}
+- Narrator tone (primary cue for the narration voice): ${safeStr(novel.narratorTone)}
+- Background: ${safeStr(novel.background)}
+- Characters: ${charSummary}
+
+TTS backend: ${getTtsProvider() === 'ai33pro' ? 'AI33 (OpenAI-compatible voices)' : 'Google Gemini preview TTS'}.
+
+Pick exactly one voice ID from each list (copy spellings exactly):
+- narratorVoice — NARRATOR lines and omniscient narration: ${opts.narrator.join(', ')}
+- femaleVoice — female character dialogue: ${opts.female.join(', ')}
+- maleVoice — male character dialogue: ${opts.male.join(', ')}
+
+Return JSON only: narratorVoice, femaleVoice, maleVoice, rationale (one short sentence).`;
+
+  const btn = document.getElementById(`suggestTtsVoicesBtn_${fd}_${novelIndex}`);
+  const orig = btn ? btn.textContent : '';
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '…';
+  }
+  try {
+    const raw = await callGeminiAPI(prompt);
+    if (!raw || typeof raw !== 'object') throw new Error('Invalid AI response');
+    const narratorVoice = pickValidTtsVoice(raw.narratorVoice, opts.narrator);
+    const femaleVoice = pickValidTtsVoice(raw.femaleVoice, opts.female);
+    const maleVoice = pickValidTtsVoice(raw.maleVoice, opts.male);
+    const rationale = safeStr(raw.rationale || raw.note);
+    novel.ttsVoices = { narratorVoice, femaleVoice, maleVoice, rationale };
+    applyTtsVoicesToSettingsUI(novel.ttsVoices);
+    const hint = document.getElementById(`ttsVoicesHint_${fd}_${novelIndex}`);
+    if (hint) {
+      hint.textContent = `Cast: ${narratorVoice} · ${femaleVoice} · ${maleVoice}${rationale ? ` — ${rationale}` : ''}`;
+    }
+    showToast('TTS voices set from this template (used for this novel’s audio). Settings updated.', 'success');
+  } catch (e) {
+    showToast(`Voice suggestion failed: ${e?.message || e}`, 'error');
+  }
+  if (btn) {
+    btn.disabled = false;
+    btn.textContent = orig || '🎚️ Suggest TTS voices from template';
+  }
+}
+
 // --- Fetch with timeout ---
 async function fetchWithTimeout(url, options, ms = 120000) {
   const ctrl = new AbortController();
@@ -1445,7 +1948,7 @@ function collectFormData() {
     authorName: document.getElementById('authorName').value.trim(),
     collectionName: document.getElementById('collectionName')?.value || '',
     cateogoriesName: document.getElementById('categoryName')?.value || '',
-    releaseDate: document.getElementById('releaseDate').value || new Date().toISOString().split('T')[0],
+    releaseDate: document.getElementById('releaseDate').value || '',
     narratorTone: document.getElementById('narratorTone').value.trim(),
     writingLanguage: document.getElementById('writingLanguage').value,
     referenceText: document.getElementById('referenceText').value.trim(),
@@ -1488,32 +1991,46 @@ function buildGeminiPrompt(formData) {
     prompt += `\n**Categories:** ${formData.cateogoriesName}`;
   }
 
+  const selectedCat = formData.cateogoriesName ? normalizeCategoryName(formData.cateogoriesName) : '';
+  const categoryBinding = selectedCat
+    ? `The brief suggests category "${selectedCat}". Use that exact string for "category" and "cateogories" on every novel unless it clearly conflicts with the story; if it conflicts, pick the closest allowed category.`
+    : `For each novel, choose one "category" from the allowed list that best fits the story. Set "cateogories" to the same string as "category".`;
+
   prompt += `
+
+## AUTO-GENERATION (DEFAULT)
+You invent the full content of every template field. The human will only supply a **Master Prompt / Idea** (and sometimes optional hints below). Do **not** leave placeholders, "TBD", or "N/A". Do **not** expect the user to control metadata: generate plausible **draftScript**, **characters** (character system), **authorName**, **releaseDate**, **category**, **narratorTone**, **background**, **collection**, and **cateogories** yourself. Optional lines in the brief are **hints only**—use them if helpful; if absent, derive everything from the Master Prompt alone.
+
+## OPTIONAL HINTS (only if present above)
+- **Draft Script & Core Ideas / Character System / Narrator Tone & Background / Author / Date / Category / Collection:** If provided, weave them in; otherwise ignore and create coherent values from the Master Prompt.
+- **narratorTone** vs **background:** Split narrative voice/POV/mood into "narratorTone"; world/setting/atmosphere into "background". If you only have one combined idea, split it sensibly—both must be substantive.
+- **category:** ${categoryBinding}
 
 ## OUTPUT REQUIREMENTS
 Generate exactly ${formData.numNovels} novel templates. Each novel template MUST include ALL of the following fields:
 
 1. **title** — A compelling, unique title for the novel
-2. **synopsis** — A SINGLE short hook line, maximum 100 characters (including spaces). No newlines.
-3. **draftScript** — The core scenario, script outline, and key ideas the story conveys
-4. **characters** — An array of characters, each with: name, role (protagonist/antagonist/supporting), age, description, arc (character development summary), gender ("male" or "female" for voice casting)
-5. **authorName** — ${formData.authorName ? `"${formData.authorName}"` : 'Generate a random, plausible author pen name for each novel (e.g. Emma Vance, Marcus Webb). Each novel must have a different author name. Do NOT use "Unknown Author" or "Anonymous".'}
-6. **releaseDate** — "${formData.releaseDate}"
-7. **narratorTone** — Description of the narrative voice, POV, and tone
-8. **background** — The world/setting description and backdrop of the story
-9. **writingLanguage** — "${formData.writingLanguage}"
-10. **chapters** — An array of 5-10 chapter outlines, each with: chapterNumber, title, summary (SHORT). CRITICAL: For each chapter, the combined string "${'title'} — ${'summary'}" must be <= 100 characters.
-11. **themes** — Array of 3–6 short, meaningful theme words or two-word phrases (e.g. redemption, first love, war trauma, family bonds, betrayal, survival). Use concrete terms only. Do NOT use vague phrases like "corruption of", "identity vs", "good vs evil", or "X of Y".
-12. **genre** — Primary and secondary genres
-13. **category** — MUST be exactly ONE of: ${ALLOWED_CATEGORIES.map(c => `"${c}"`).join(', ')} (no extra text)
-14. **collection** — "${formData.collectionName || ''}"
-15. **cateogories** — "${formData.cateogoriesName || ''}"
-16. **thumbnailPrompt** — A ready-to-paste prompt for Gemini Image generation to create a square 1:1 thumbnail image (NO TEXT). Must be a single string.
-17. **premium** — "yes" or "no" (whether the novel is premium content)
-18. **show** — "yes" or "no" (whether to show the novel in listings)
+2. **synopsis** — A SINGLE short hook/tagline for listings, maximum 100 characters (including spaces). No newlines.
+3. **overview** — A full-meaning overview of the novel: 2–5 sentences (about 300–900 characters). Plain prose only; no bullet lists. Explain premise, central conflict, emotional stakes, and what makes the story compelling. This is the reader-facing summary, not the draft script.
+4. **draftScript** — Full draft scenario: core plot/scene outline and key ideas (you author this; optional brief hints may inspire it)
+5. **characters** — An array of characters, each with: name, role (protagonist/antagonist/supporting), age, description, arc (character development summary), gender ("male" or "female" for voice casting)
+6. **authorName** — ${formData.authorName ? `Prefer "${formData.authorName}" if it fits; otherwise a plausible pen name. Each novel should have a distinct author unless the brief implies a shared byline.` : 'A plausible author pen name per novel (e.g. Emma Vance, Marcus Webb). Each novel must have a different author name. Do NOT use "Unknown Author" or "Anonymous".'}
+7. **releaseDate** — ${formData.releaseDate ? `Use "${formData.releaseDate}" unless a different date fits the story better.` : 'Invent a plausible YYYY-MM-DD (one shared date or varied per novel, e.g. within the next few years).'}
+8. **narratorTone** — Narrative voice, POV, and tone (you invent; optional brief may hint)
+9. **background** — World, setting, and story backdrop (distinct from narratorTone; you invent)
+10. **writingLanguage** — "${formData.writingLanguage}"
+11. **chapters** — An array of 5-10 chapter outlines, each with: chapterNumber, title, summary (SHORT). CRITICAL: For each chapter, the combined string "${'title'} — ${'summary'}" must be <= 100 characters.
+12. **themes** — Array of 3–6 short, meaningful theme words or two-word phrases (e.g. redemption, first love, war trauma, family bonds, betrayal, survival). Use concrete terms only. Do NOT use vague phrases like "corruption of", "identity vs", "good vs evil", or "X of Y".
+13. **genre** — Primary and secondary genres
+14. **category** — MUST be exactly ONE of: ${ALLOWED_CATEGORIES.map(c => `"${c}"`).join(', ')} (no extra text)
+15. **collection** — ${formData.collectionName ? `"${formData.collectionName}"` : 'Invent a short collection or series label that fits the novel (may repeat across the batch if they share a universe).'}
+16. **cateogories** — ${formData.cateogoriesName ? `Same string as "category" (see optional category hint above).` : 'Same string as "category" for that novel.'}
+17. **thumbnailPrompt** — One string for Gemini Image: book-cover art **inspired by draftScript, overview, themes, and background**; must describe **showing the novel title** as clear, readable typography (exact title text). Must be a single string.
+18. **premium** — "yes" or "no" (whether the novel is premium content)
+19. **show** — "yes" or "no" (whether to show the novel in listings)
 
 Each novel should be DISTINCT — different plot, different character dynamics, different themes — while still being inspired by the creative brief.
-CRITICAL: Every novel MUST have a non-empty synopsis that is <= 100 characters, and MUST have 5-10 chapters with chapterNumber, title, and summary for each.
+CRITICAL: Every novel MUST have a non-empty synopsis (<= 100 characters) AND a non-empty overview (full meaning, roughly 300+ characters); non-empty draftScript, narratorTone, and background; at least two entries in characters; and MUST have 5-10 chapters with chapterNumber, title, and summary for each.
 
 ## OUTPUT FORMAT (CRITICAL)
 You MUST return valid JSON only. No markdown code blocks, no backticks, no explanation—just the raw JSON object.
@@ -1522,6 +2039,7 @@ You MUST return valid JSON only. No markdown code blocks, no backticks, no expla
     {
       "title": "...",
       "synopsis": "...",
+      "overview": "...",
       "draftScript": "...",
       "characters": [
         { "name": "...", "role": "...", "age": "...", "description": "...", "arc": "...", "gender": "female" }
@@ -1549,28 +2067,41 @@ You MUST return valid JSON only. No markdown code blocks, no backticks, no expla
   return prompt;
 }
 
+/** Text bundle from the novel template to steer cover/thumbnail imagery (core ideas). */
+function getNovelCoreIdeasForImage(novel, maxLen = 900) {
+  const ov = safeStr(novel?.overview);
+  const syn = safeStr(novel?.synopsis);
+  const ds = safeStr(novel?.draftScript);
+  const bg = safeStr(novel?.background);
+  const themes = Array.isArray(novel?.themes) && novel.themes.length ? novel.themes.join(', ') : '';
+  const chunks = [];
+  if (ov) chunks.push(`Overview: ${ov}`);
+  else if (syn) chunks.push(`Synopsis: ${syn}`);
+  if (ds) chunks.push(`Core ideas / draft script: ${ds}`);
+  if (bg) chunks.push(`Setting / backdrop: ${bg}`);
+  if (themes) chunks.push(`Themes: ${themes}`);
+  let s = chunks.join('\n');
+  if (!s.trim()) s = 'Derive visuals from genre, narrator tone, and title.';
+  if (s.length > maxLen) s = s.slice(0, Math.max(0, maxLen - 1)) + '…';
+  return s;
+}
+
 function buildThumbnailPromptFromNovel(novel) {
   const title = safeStr(novel?.title) || 'Untitled novel';
   const genre = safeStr(novel?.genre) || safeStr(novel?.cateogories) || safeStr(novel?.category) || 'Fiction';
-  const setting = safeStr(novel?.background) || 'Not specified';
   const mood = safeStr(novel?.narratorTone) || 'Cinematic';
-  const synopsis = safeStr(novel?.synopsis);
-  const motifs = synopsis
-    ? synopsis.split(/[.?!]/).map(s => s.trim()).filter(Boolean).slice(0, 2).join(' / ')
-    : '';
+  const coreIdeas = getNovelCoreIdeasForImage(novel, 900);
 
   const lines = [
-    'Create a SQUARE 1:1 novel thumbnail image (NO TEXT, no typography, no watermark, no logo).',
-    `Title concept: "${title}"`,
-    `Genre: ${genre}`,
-    `Setting: ${setting}`,
-    `Mood/tone: ${mood}`,
-    motifs ? `Key elements: ${motifs}` : 'Key elements: 1–3 strong visual motifs from the story.',
-    '',
-    'Style: cinematic, professional cover-art quality, high contrast, clear focal point, simple readable silhouette at small size.',
-    'Composition: centered subject, minimal clutter, dramatic lighting, sharp focus.',
-    'Constraints: avoid readable text, avoid extra limbs/fingers, avoid blurry faces.',
-    '',
+    'Create a SQUARE 1:1 book cover / thumbnail image.',
+    `Typography (required): prominently display the novel title in clear, readable lettering. Exact title text to spell: "${title}". Use elegant, genre-appropriate fonts; strong contrast against the artwork.`,
+    `Genre: ${genre}. Mood / narrative voice: ${mood}.`,
+    'The illustration must be clearly inspired by the novel’s core ideas below (conflict, symbols, characters, world)—not generic unrelated stock imagery.',
+    '---',
+    coreIdeas,
+    '---',
+    'Style: cinematic or painterly book-cover quality, dramatic lighting, one strong focal subject, professional publishing look.',
+    'Constraints: no watermarks, no logos. Title must be legible and spelled exactly as given. Avoid garbled text, extra limbs, or blurry faces.',
     'Output: 1 image only.',
   ];
   return lines.join('\n');
@@ -1580,23 +2111,19 @@ function buildThumbnailPromptFromNovel(novel) {
 function buildThumbnail34PromptFromNovel(novel) {
   const title = safeStr(novel?.title) || 'Untitled novel';
   const genre = safeStr(novel?.genre) || safeStr(novel?.cateogories) || safeStr(novel?.category) || 'Fiction';
-  const setting = safeStr(novel?.background) || 'Not specified';
   const mood = safeStr(novel?.narratorTone) || 'Cinematic';
-  const synopsis = safeStr(novel?.synopsis);
-  const motifs = synopsis
-    ? synopsis.split(/[.?!]/).map(s => s.trim()).filter(Boolean).slice(0, 2).join(' / ')
-    : '';
+  const coreIdeas = getNovelCoreIdeasForImage(novel, 900);
   const lines = [
-    'Create a VERTICAL 3:4 portrait novel thumbnail / book cover image (NO TEXT, no typography, no watermark, no logo).',
-    `Title concept: "${title}"`,
-    `Genre: ${genre}`,
-    `Setting: ${setting}`,
-    `Mood/tone: ${mood}`,
-    motifs ? `Key elements: ${motifs}` : 'Key elements: 1–3 strong visual motifs from the story.',
-    '',
-    'Style: cinematic, professional book-cover quality, high contrast, clear focal point. Portrait orientation (taller than wide).',
-    'Composition: centered or rule-of-thirds subject, dramatic lighting, sharp focus. Suited for 3:4 aspect ratio.',
-    'Constraints: avoid readable text, avoid extra limbs/fingers, avoid blurry faces.',
+    'Create a VERTICAL 3:4 portrait book cover / novel thumbnail (taller than wide).',
+    `Typography (required): prominently display the novel title in clear, readable lettering. Exact title text: "${title}". Elegant, genre-appropriate fonts; high contrast.`,
+    `Genre: ${genre}. Mood / narrative voice: ${mood}.`,
+    'Artwork must be inspired by the novel’s core ideas below—scene, metaphor, or key visual from the story—not a generic unrelated image.',
+    '---',
+    coreIdeas,
+    '---',
+    'Style: cinematic, professional book-cover quality, high contrast, clear focal point.',
+    'Composition: rule-of-thirds or centered hero subject; space for title; suited to 3:4 aspect ratio.',
+    'Constraints: no watermarks, no logos. Title spelling must match exactly. Avoid garbled letters, extra limbs, blurry faces.',
     '',
     'Output: 1 image only.',
   ];
@@ -1791,7 +2318,10 @@ async function generateNovelsParallel(formData) {
   if (!keys.length && getAIProvider() !== 'deepseek') {
     throw new Error('No API key. Enter your Gemini key in the API Key(s) field.');
   }
-  const concurrency = Math.min(4, total, Math.max(1, keys.length || 1));
+  // Parallel novels: multiple templates in flight at once. Scale with key count; still allow several
+  // concurrent requests on a single key (typical Gemini quota allows parallel calls).
+  const keyCount = Math.max(1, keys.length || 1);
+  const concurrency = Math.min(8, total, Math.max(4, keyCount * 4));
   const queue = Array.from({ length: total }, (_, i) => i);
   const out = new Array(total);
   let done = 0;
@@ -1834,7 +2364,7 @@ async function generateNovelsParallel(formData) {
   if (dupIndices.length) {
     const avoidTitles = out.map(n => safeStr(n?.title)).filter(Boolean);
     const retryQueue = dupIndices.slice();
-    const retryConcurrency = Math.min(3, retryQueue.length, Math.max(1, keys.length || 1));
+    const retryConcurrency = Math.min(6, retryQueue.length, Math.max(1, keys.length || 1));
     const retryWorker = async (workerId) => {
       while (retryQueue.length) {
         const i = retryQueue.shift();
@@ -1856,66 +2386,113 @@ async function generateNovelsParallel(formData) {
   return out.filter(Boolean);
 }
 
-// --- Generate Handler ---
+// --- Generate Handler (per-flow; parallel runs do not block each other) ---
 async function handleGenerate() {
   if (!validateForm()) return;
-  if (state.isGenerating) return;
+  ensureActiveFlow();
+  const flow = getFlow(state.activeFlowId);
+  if (flow?.generating) return;
+  await runFlowGenerate(state.activeFlowId);
+}
 
-  state.isGenerating = true;
-  const btn = document.getElementById('generateBtn');
-  btn.classList.add('loading');
-  btn.disabled = true;
+async function handleNewParallelRun() {
+  if (!validateForm()) return;
+  const formData = collectFormData();
+  const id = newFlowId();
+  state.flows[id] = createFlowState(id, flowLabelFromPrompt(formData.masterPrompt));
+  state.activeFlowId = id;
+  ensureFlowPanelDom(id);
+  renderFlowTabs();
+  switchToFlow(id);
+  await runFlowGenerate(id);
+}
+
+async function runFlowGenerate(flowId) {
+  const flow = getFlow(flowId);
+  if (!flow || flow.generating) return;
+  if (!validateForm()) return;
+
+  flow.generating = true;
+  flow.status = 'generating';
+  flow.errorMessage = '';
+  renderFlowTabs();
+  refreshGenerateButtonState();
+  setFlowStatusLine(`${flow.label}: generating templates…`);
 
   showProgress(true);
-  updateProgress(10, 'Preparing creative brief...');
+  updateProgress(10, 'Preparing creative brief…');
 
   try {
     const formData = collectFormData();
-    updateProgress(25, 'Building AI prompt...');
+    flow.label = flowLabelFromPrompt(formData.masterPrompt);
+    renderFlowTabs();
+    updateProgress(25, 'Building AI prompt…');
 
     const provider = getAIProvider() === 'deepseek' ? 'DeepSeek' : 'Gemini';
-    updateProgress(40, `Generating ${formData.numNovels} novel templates with ${provider} (parallel mode)...`);
+    updateProgress(40, `Generating ${formData.numNovels} novel templates with ${provider} (parallel mode)…`);
 
     const novels = await generateNovelsParallel(formData);
-    updateProgress(85, 'Processing results...');
+    updateProgress(85, 'Processing results…');
 
-    state.novels = novels;
-    normalizeNovelsForExport(state.novels);
-    stampCollectionAndCategoriesFromForm(state.novels);
-    addHistoryRun(formData, state.novels);
-    updateProgress(95, 'Generating thumbnails...');
+    flow.novels = novels;
+    normalizeNovelsForExport(flow.novels);
+    stampCollectionAndCategoriesFromForm(flow.novels);
+    applyAutoReviewTemplateToNovels(flow.novels);
+    addHistoryRun(formData, flow.novels, flowId);
+    flow.status = 'ready';
+    updateProgress(95, 'Rendering results…');
     setTimeout(() => {
       showProgress(false);
-      renderResults(state.novels);
-      showToast(`Generated ${state.novels.length} templates. Generating thumbnails...`, 'success');
-      // Generate cover + thumbnail for each template (for review + export).
-      generateCoversForAllTemplates();
-    }, 300);
+      setFlowStatusLine('');
+      renderFlowResults(flowId);
+      renderFlowTabs();
+      showToast(`Generated ${flow.novels.length} templates. Generating thumbnails…`, 'success');
+      generateCoversForAllTemplates(flowId);
 
+      const runStories = document.getElementById('autoGenerateStoriesAfterTemplates')?.checked;
+      const keys = getApiKeys();
+      if (runStories && keys.length && flow.novels?.length) {
+        showToast('Templates ready. Generating full stories from each template…', 'info');
+        void handleGenerateAllStories(flowId).catch((err) => {
+          console.error('Auto full stories failed:', err);
+          showToast('Full-story pass failed: ' + (err?.message || String(err)), 'error');
+        });
+      } else if (runStories && !keys.length) {
+        showToast('Enable “after templates” full stories only works with an API key in Settings.', 'error');
+      }
+    }, 300);
   } catch (error) {
     console.error('Generation error:', error);
     showProgress(false);
-    let msg = error?.message || String(error);
+    setFlowStatusLine('');
+    flow.status = 'error';
+    flow.errorMessage = error?.message || String(error);
+    let msg = flow.errorMessage;
     if (msg === 'Failed to fetch' || msg.includes('NetworkError')) {
       msg = 'Network error. If using file://, run: npx serve -l 3000 and open http://localhost:3000';
     }
     showToast('Generation failed: ' + msg, 'error');
   } finally {
-    state.isGenerating = false;
-    btn.classList.remove('loading');
-    btn.disabled = false;
+    flow.generating = false;
+    renderFlowTabs();
+    refreshGenerateButtonState();
+    setFlowStatusLine(getActiveFlow()?.generating ? `${getActiveFlow().label}: generating…` : '');
   }
 }
 
 // --- Auto-generate cover + thumbnail for templates (for review UI + export) ---
-function ensureCoverThumbInCard(index) {
-  const novel = state.novels?.[index];
+function ensureCoverThumbInCard(flowId, index) {
+  const flow = getFlow(flowId);
+  if (!flow) return;
+  const fd = flowDomId(flowId);
+  const novel = flow.novels?.[index];
   if (!novel) return;
   const dataUrl =
     (typeof novel.thumbnail === 'string' && novel.thumbnail.startsWith('data:image/')) ? novel.thumbnail
       : (typeof novel.cover === 'string' && novel.cover.startsWith('data:image/')) ? novel.cover : '';
   if (!dataUrl) return;
-  const card = document.querySelector(`.novel-card[data-index="${index}"]`);
+  const panel = document.getElementById(`flowPanel_${fd}`);
+  const card = panel?.querySelector(`.novel-card[data-index="${index}"]`);
   const info = card?.querySelector('.novel-card-header .novel-info');
   if (!info) return;
   if (info.querySelector(`img.novel-cover-thumb[data-index="${index}"]`)) return;
@@ -1927,39 +2504,38 @@ function ensureCoverThumbInCard(index) {
   info.appendChild(img);
 }
 
-async function generateCoverForNovel(index) {
-  const novel = state.novels?.[index];
+async function generateCoverForNovel(flowId, index) {
+  const flow = getFlow(flowId);
+  if (!flow) return;
+  const novel = flow.novels?.[index];
   if (!novel) return;
   if (typeof novel.cover === 'string' && novel.cover.startsWith('data:image/')) {
-    ensureCoverThumbInCard(index);
+    ensureCoverThumbInCard(flowId, index);
     return;
   }
   if (typeof callImageGenerationAPI !== 'function') return;
 
-  const prompt = `Book cover illustration for a novel. No text, no typography, no watermark.
-Title concept: "${novel.title || 'Untitled'}".
-Genre: ${novel.genre || novel.category || 'Fiction'}.
-Setting/background: ${novel.background || 'not specified'}.
-Main mood/tone: ${novel.narratorTone || ''}.
-Composition: centered subject, cinematic lighting, high detail, professional cover art.`;
+  const prompt = buildThumbnailPromptFromNovel(novel);
 
-  const cover = await callImageGenerationAPI(prompt, novel);
+  const cover = await callImageGenerationAPI(prompt, novel, { aspectRatio: '1:1' });
   novel.cover = cover;
   novel.thumbnail = await resizeDataUrl(cover, 128, 128, 'image/png');
-  ensureCoverThumbInCard(index);
+  ensureCoverThumbInCard(flowId, index);
 }
 
-async function generateCoversForAllTemplates() {
-  const novels = state.novels || [];
+async function generateCoversForAllTemplates(flowId) {
+  const flow = getFlow(flowId);
+  if (!flow) return;
+  const novels = flow.novels || [];
   if (!Array.isArray(novels) || !novels.length) return;
 
-  const indices = novels.map((_, i) => i).filter(i => !(typeof novels[i]?.cover === 'string' && novels[i].cover.startsWith('data:image/')));
+  let indices = novels.map((_, i) => i).filter(i => !(typeof novels[i]?.cover === 'string' && novels[i].cover.startsWith('data:image/')));
   if (!indices.length) {
-    indices.forEach(i => ensureCoverThumbInCard(i));
+    novels.forEach((_, i) => ensureCoverThumbInCard(flowId, i));
     return;
   }
 
-  const concurrency = Math.min(3, indices.length);
+  const concurrency = Math.min(5, indices.length);
   const queue = indices.slice();
   let done = 0;
   showToast(`Generating ${indices.length} thumbnails for templates...`, 'info');
@@ -1969,7 +2545,7 @@ async function generateCoversForAllTemplates() {
       const i = queue.shift();
       if (i == null) break;
       try {
-        await generateCoverForNovel(i);
+        await generateCoverForNovel(flowId, i);
         done++;
         showToast(`Cover images: ${done}/${indices.length}`, 'info');
       } catch (e) {
@@ -2021,9 +2597,11 @@ async function validateThumbnail34DataUrl(dataUrl) {
   };
 }
 
-function setThumbnail34StatusInCard(index, meta) {
-  const card = document.querySelector(`.novel-card[data-index="${index}"]`);
-  const el = card?.querySelector(`#thumbnail34Status_${index}`);
+function setThumbnail34StatusInCard(flowId, index, meta) {
+  const fd = flowDomId(flowId);
+  const panel = document.getElementById(`flowPanel_${fd}`);
+  const card = panel?.querySelector(`.novel-card[data-index="${index}"]`);
+  const el = card?.querySelector(`#thumbnail34Status_${fd}_${index}`);
   if (!el) return;
   if (!meta) {
     el.textContent = 'Not generated yet.';
@@ -2051,105 +2629,133 @@ function setThumbnail34StatusInCard(index, meta) {
 }
 
 // --- Generate novel thumbnail (3:4 ratio) from template ---
-async function generateThumbnail34ForNovel(index) {
-  const novel = state.novels?.[index];
+async function generateThumbnail34ForNovel(flowId, index, options = {}) {
+  const silent = Boolean(options.silent);
+  const flow = getFlow(flowId);
+  if (!flow) return;
+  const fd = flowDomId(flowId);
+  const novel = flow.novels?.[index];
   if (!novel) return;
-  const btn = document.getElementById(`generateThumbnail34Btn_${index}`);
+  const btn = document.getElementById(`generateThumbnail34Btn_${fd}_${index}`);
   if (btn) { btn.disabled = true; btn.classList.add('loading'); }
   try {
     novel.thumbnail34Check = null;
-    setThumbnail34StatusInCard(index, null);
+    setThumbnail34StatusInCard(flowId, index, null);
     const prompt = buildThumbnail34PromptFromNovel(novel);
     const dataUrl = await callImageGenerationAPI(prompt, novel, { aspectRatio: '3:4' });
     if (dataUrl) {
       novel.thumbnail = dataUrl;
       novel.cover = dataUrl;
-      const card = document.querySelector(`.novel-card[data-index="${index}"]`);
+      const panel = document.getElementById(`flowPanel_${fd}`);
+      const card = panel?.querySelector(`.novel-card[data-index="${index}"]`);
       const img = card?.querySelector(`.novel-cover-thumb[data-index="${index}"]`);
-      if (img) img.src = dataUrl; else ensureCoverThumbInCard(index);
+      if (img) img.src = dataUrl; else ensureCoverThumbInCard(flowId, index);
       try {
         novel.thumbnail34Check = await validateThumbnail34DataUrl(dataUrl);
       } catch (e) {
         novel.thumbnail34Check = { error: e?.message || String(e) };
       }
-      setThumbnail34StatusInCard(index, novel.thumbnail34Check);
+      setThumbnail34StatusInCard(flowId, index, novel.thumbnail34Check);
       const usedGemini = !!getGeminiKeyForImages();
-      showToast(`Thumbnail generated. Check: ${novel.thumbnail34Check?.ok ? 'OK' : 'Review'}${!usedGemini ? ' (free API may not be 3:4)' : ''}`, novel.thumbnail34Check?.ok ? 'success' : 'info');
+      if (!silent) {
+        showToast(`Thumbnail generated. Check: ${novel.thumbnail34Check?.ok ? 'OK' : 'Review'}${!usedGemini ? ' (free API may not be 3:4)' : ''}`, novel.thumbnail34Check?.ok ? 'success' : 'info');
+      }
     }
   } catch (e) {
-    showToast(`Thumbnail failed: ${e?.message || 'Unknown error'}`, 'error');
+    if (!silent) showToast(`Thumbnail failed: ${e?.message || 'Unknown error'}`, 'error');
     novel.thumbnail34Check = { error: e?.message || String(e) };
-    setThumbnail34StatusInCard(index, novel.thumbnail34Check);
+    setThumbnail34StatusInCard(flowId, index, novel.thumbnail34Check);
   }
   if (btn) { btn.disabled = false; btn.classList.remove('loading'); }
 }
 
 async function generateThumbnails34ForAll() {
-  const novels = state.novels || [];
+  const flow = ensureActiveFlow();
+  const novels = flow.novels || [];
   if (!novels.length) {
     showToast('Generate novel templates first.', 'error');
     return;
   }
+  const flowId = state.activeFlowId;
   const btn = document.getElementById('generateThumbnails34AllBtn');
   if (btn) { btn.disabled = true; btn.classList.add('loading'); }
-  const concurrency = Math.min(2, novels.length);
+  const keys = getApiKeys();
+  const keyCount = Math.max(1, keys.length || 1);
+  const indices = novels.map((_, i) => i);
+  const queue = indices.slice();
+  const concurrency = Math.min(6, queue.length, Math.max(3, keyCount * 2));
   let done = 0;
-  showToast(`Generating 3:4 thumbnails for ${novels.length} novel(s)...`, 'info');
-  for (let i = 0; i < novels.length; i++) {
-    try {
-      await generateThumbnail34ForNovel(i);
+  const total = indices.length;
+  showToast(`Generating ${total} novel thumbnails (3:4), ${concurrency} at a time…`, 'info');
+
+  const worker = async () => {
+    while (queue.length) {
+      const i = queue.shift();
+      if (i == null) break;
+      try {
+        await generateThumbnail34ForNovel(flowId, i, { silent: true });
+      } catch (_) {}
       done++;
-      showToast(`Thumbnails: ${done}/${novels.length}`, 'info');
-    } catch (_) {}
-    if (i < novels.length - 1) await new Promise(r => setTimeout(r, 500));
-  }
+      showToast(`Thumbnails: ${done}/${total}`, 'info');
+      await new Promise(r => setTimeout(r, 40));
+    }
+  };
+
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
   if (btn) { btn.disabled = false; btn.classList.remove('loading'); }
-  showToast('Novel thumbnails (3:4) finished', 'success');
+  showToast(`Novel thumbnails (3:4) finished (${total}).`, 'success');
 }
 
-// --- Render Results ---
-function renderResults(novels) {
+// --- Render Results (per flow / tab) ---
+function renderFlowResults(flowId, novelsOpt) {
+  const flow = getFlow(flowId);
+  if (!flow) return;
+  const novels = novelsOpt != null ? novelsOpt : flow.novels;
+  ensureFlowPanelDom(flowId);
+  const fd = flowDomId(flowId);
   const section = document.getElementById('resultsSection');
-  const container = document.getElementById('novelsContainer');
+  const container = document.getElementById(`novelsContainer_${fd}`);
   const countEl = document.getElementById('resultsCount');
 
+  if (!container || !section) return;
   section.classList.add('active');
-  countEl.textContent = `${novels.length} novels generated`;
+  if (state.activeFlowId === flowId && countEl) {
+    countEl.textContent = `${novels.length} novels generated`;
+  }
   container.innerHTML = '';
 
   novels.forEach((novel, index) => {
-    const card = createNovelCard(novel, index);
+    const card = createNovelCard(novel, index, flowId);
     card.style.animationDelay = `${index * 0.1}s`;
     container.appendChild(card);
   });
 
-  // Attach edit sync listeners
-  attachEditSyncListeners(container);
+  attachEditSyncListeners(container, flowId);
 
-  // Ensure thumbs persist even when cards rerender
   try {
-    novels.forEach((_, i) => ensureCoverThumbInCard(i));
+    novels.forEach((_, i) => ensureCoverThumbInCard(flowId, i));
   } catch (_) {}
 
-  // Populate thumbnail check status
   try {
-    novels.forEach((n, i) => setThumbnail34StatusInCard(i, n?.thumbnail34Check || null));
+    novels.forEach((n, i) => setThumbnail34StatusInCard(flowId, i, n?.thumbnail34Check || null));
   } catch (_) {}
 
-  // Expand first card so template content (synopsis, chapter outline, etc.) is visible
   const firstCard = container?.querySelector('.novel-card');
   if (firstCard) firstCard.classList.add('expanded');
 
-  // Scroll to results
-  section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  if (state.activeFlowId === flowId) {
+    section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
 }
 
-function createNovelCard(novel, index) {
+function createNovelCard(novel, index, flowId) {
+  const flow = getFlow(flowId);
+  const fd = flowDomId(flowId);
   const card = document.createElement('div');
   card.className = 'novel-card';
   card.dataset.index = index;
+  card.dataset.flowId = flowId;
 
-  // Characters HTML (editable)
   let charactersHtml = '';
   if (novel.characters && Array.isArray(novel.characters)) {
     charactersHtml = novel.characters.map((c, ci) => `
@@ -2158,7 +2764,6 @@ function createNovelCard(novel, index) {
     charactersHtml = `<ul>${charactersHtml}</ul>`;
   }
 
-  // Chapters HTML (editable) — data attributes for syncing
   let chaptersHtml = '';
   if (novel.chapters && Array.isArray(novel.chapters)) {
     chaptersHtml = novel.chapters.map((ch, ci) => `
@@ -2171,35 +2776,41 @@ function createNovelCard(novel, index) {
 
   const tagsDisplay = getTagsDisplayText(novel);
 
-  const isReviewed = state.reviewedNovels.has(index);
+  const isReviewed = flow && flow.reviewedNovels.has(index);
   const coverThumb = (typeof novel?.thumbnail === 'string' && novel.thumbnail.startsWith('data:image/'))
     ? novel.thumbnail
     : (typeof novel?.cover === 'string' && novel.cover.startsWith('data:image/')) ? novel.cover : '';
   const coverHref = (typeof novel?.cover === 'string' && novel.cover.startsWith('data:image/')) ? novel.cover : coverThumb;
   card.innerHTML = `
-    <div class="novel-card-header" onclick="toggleNovelCard(${index})">
+    <div class="novel-card-header" onclick="toggleNovelCard('${flowId}',${index})">
       <div class="novel-info">
         <div class="novel-number">${index + 1}</div>
         <div class="novel-title editable" contenteditable="true" data-novel="${index}" data-field="title">${escapeHtml(novel.title || 'Untitled Novel')}</div>
         ${coverThumb ? `<a href="${coverHref}" target="_blank" rel="noopener" title="Open cover image"><img class="novel-cover-thumb" data-index="${index}" src="${coverThumb}" alt="Cover ${index + 1}"/></a>` : ''}
       </div>
       <div class="actions">
-        <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); generateThumbnail34ForNovel(${index})" id="generateThumbnail34Btn_${index}" title="Generate 3:4 thumbnail from this novel template">
+        <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); generateThumbnail34ForNovel('${flowId}',${index})" id="generateThumbnail34Btn_${fd}_${index}" title="Generate 3:4 thumbnail from this novel template">
           <span class="spinner"></span><span class="btn-text">🖼️ Thumbnail (3:4)</span>
         </button>
-        <button class="btn btn-story btn-sm" onclick="event.stopPropagation(); generateFullStory(${index})" id="storyBtn_${index}">
+        <button class="btn btn-story btn-sm" onclick="event.stopPropagation(); generateFullStory('${flowId}',${index})" id="storyBtn_${fd}_${index}">
           <span class="spinner"></span><span class="btn-text">📖 Generate Full Story</span>
         </button>
-        <button class="btn btn-secondary btn-sm review-toggle ${isReviewed ? 'reviewed' : ''}" onclick="event.stopPropagation(); toggleManualReview(${index})" title="${isReviewed ? 'Revoke manual review' : 'Mark as passed manual review'}">
+        <button class="btn btn-secondary btn-sm review-toggle ${isReviewed ? 'reviewed' : ''}" onclick="event.stopPropagation(); toggleManualReview('${flowId}',${index})" title="${isReviewed ? 'Revoke manual review' : 'Mark as passed manual review'}">
           ${isReviewed ? '✅ Passed' : '⬜ Review'}
         </button>
-        <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); downloadNovel(${index})" title="Download template as .txt">
+        <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); downloadNovel('${flowId}',${index})" title="Download template as .txt">
           📥 Template
         </button>
         <span class="expand-icon">▼</span>
       </div>
     </div>
     <div class="novel-card-body">
+      ${novel._autoReview?.template ? `
+      <div class="auto-review-banner ${novel._autoReview.template.ok ? 'ok' : 'warn'}" id="autoReviewTemplate_${fd}_${index}">
+        <div class="auto-review-title">🔍 Auto-review (template)</div>
+        <p class="auto-review-sub">Character system synchronized (names deduped, roles/genders normalized).</p>
+        ${formatAutoReviewIssuesHtml(novel._autoReview.template.issues)}
+      </div>` : ''}
       <div class="edit-hint">💡 Click any text field below to edit it</div>
 
       <div class="novel-field">
@@ -2220,7 +2831,12 @@ function createNovelCard(novel, index) {
       <div class="divider"></div>
 
       <div class="novel-field">
-        <div class="novel-field-label">📝 Synopsis</div>
+        <div class="novel-field-label">📖 Overview <span class="optional-badge">full meaning</span></div>
+        <div class="novel-field-content editable tall" contenteditable="true" data-novel="${index}" data-field="overview">${escapeHtml(novel.overview || novel.synopsis || 'N/A')}</div>
+      </div>
+
+      <div class="novel-field">
+        <div class="novel-field-label">📝 Short tagline <span class="optional-badge">≤100 chars</span></div>
         <div class="novel-field-content editable" contenteditable="true" data-novel="${index}" data-field="synopsis">${escapeHtml(novel.synopsis || 'N/A')}</div>
       </div>
 
@@ -2243,6 +2859,12 @@ function createNovelCard(novel, index) {
       <div class="novel-field">
         <div class="novel-field-label">🎭 Narrator Tone</div>
         <div class="novel-field-content editable" contenteditable="true" data-novel="${index}" data-field="narratorTone">${escapeHtml(novel.narratorTone || 'N/A')}</div>
+        <div class="tts-voice-suggest-row">
+          <button type="button" class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); suggestTtsVoicesFromTemplate('${flowId}',${index})" id="suggestTtsVoicesBtn_${fd}_${index}" title="Use AI (narrator tone + cast) to pick TTS voices; applies to this novel and updates Settings">
+            🎚️ Suggest TTS voices from template
+          </button>
+          <span class="form-hint tts-voices-hint" id="ttsVoicesHint_${fd}_${index}">${novel.ttsVoices?.narratorVoice ? `Cast: ${escapeHtml(novel.ttsVoices.narratorVoice)} · ${escapeHtml(novel.ttsVoices.femaleVoice)} · ${escapeHtml(novel.ttsVoices.maleVoice)}` : ''}</span>
+        </div>
       </div>
 
       <div class="novel-field">
@@ -2251,13 +2873,13 @@ function createNovelCard(novel, index) {
       </div>
 
       <div class="novel-field">
-        <div class="novel-field-label">🖼️ Thumbnail Prompt (paste into Gemini Image)</div>
+        <div class="novel-field-label">🖼️ Thumbnail / cover prompt (title on image + art from core ideas)</div>
         <div class="novel-field-content editable" contenteditable="true" data-novel="${index}" data-field="thumbnailPrompt">${escapeHtml(novel.thumbnailPrompt || 'N/A')}</div>
       </div>
 
       <div class="novel-field">
         <div class="novel-field-label">✅ Thumbnail (3:4) Check</div>
-        <div class="novel-field-content" id="thumbnail34Status_${index}" data-state="neutral">Not generated yet.</div>
+        <div class="novel-field-content" id="thumbnail34Status_${fd}_${index}" data-state="neutral">Not generated yet.</div>
       </div>
 
       <div class="divider"></div>
@@ -2296,35 +2918,33 @@ function createNovelCard(novel, index) {
 
       <div class="divider"></div>
 
-      <!-- Review hint when not yet passed -->
-      ${!isReviewed ? '<div class="review-required-inline" id="reviewRequired_' + index + '"><span class="review-required-icon">📋</span> (Optional) Mark as <strong>Passed Manual Review</strong> to track templates you approve.</div>' : ''}
+      ${!isReviewed ? '<div class="review-required-inline" id="reviewRequired_' + fd + '_' + index + '"><span class="review-required-icon">📋</span> (Optional) Mark as <strong>Passed Manual Review</strong> to track templates you approve.</div>' : ''}
 
-      <!-- Full Story Section (populated after generation) -->
-      <div class="story-section" id="storySection_${index}" style="display:none">
+      <div class="story-section" id="storySection_${fd}_${index}" style="display:none">
+        <div id="autoReviewStory_${fd}_${index}" class="auto-review-banner" style="display:none" data-auto-review="story"></div>
         <div class="novel-field">
           <div class="novel-field-label">📜 Full Story <span class="editable-badge">(editable)</span></div>
-          <div class="story-content editable" contenteditable="true" id="storyContent_${index}" data-story-index="${index}"></div>
+          <div class="story-content editable" contenteditable="true" id="storyContent_${fd}_${index}" data-flow-id="${flowId}" data-story-index="${index}"></div>
         </div>
         <div class="story-actions">
-          <button class="btn btn-secondary btn-sm" onclick="downloadStory(${index})">📥 Download Story .txt</button>
-          <button class="btn btn-audio btn-sm" onclick="generateAudioDramaScript(${index})" id="audioScriptBtn_${index}">
+          <button class="btn btn-secondary btn-sm" onclick="downloadStory('${flowId}',${index})">📥 Download Story .txt</button>
+          <button class="btn btn-audio btn-sm" onclick="generateAudioDramaScript('${flowId}',${index})" id="audioScriptBtn_${fd}_${index}">
             <span class="spinner"></span>
             <span class="btn-text">🎙️ Generate Audio Drama Script</span>
           </button>
         </div>
-        <!-- Audio Drama Script (populated after generation - segments with Listen + Edit) -->
-        <div class="audio-script-section" id="audioScriptSection_${index}" style="display:none">
+        <div class="audio-script-section" id="audioScriptSection_${fd}_${index}" style="display:none">
           <div class="novel-field">
             <div class="novel-field-label">🎙️ Audio Drama Script <span class="editable-badge">(edit & listen to each segment)</span></div>
-            <div class="script-segments" id="audioScriptSegments_${index}"></div>
+            <div class="script-segments" id="audioScriptSegments_${fd}_${index}"></div>
           </div>
           <div class="story-actions">
-            <button class="btn btn-secondary btn-sm" onclick="downloadAudioScript(${index})">📥 Download Script .txt</button>
-            <button class="btn btn-audio btn-sm" onclick="generateAllAudio(${index})" id="generateAllAudioBtn_${index}" title="Uses multiple keys in parallel for faster generation">
+            <button class="btn btn-secondary btn-sm" onclick="downloadAudioScript('${flowId}',${index})">📥 Download Script .txt</button>
+            <button class="btn btn-audio btn-sm" onclick="generateAllAudio('${flowId}',${index})" id="generateAllAudioBtn_${fd}_${index}" title="Uses multiple keys in parallel for faster generation">
               <span class="spinner"></span>
               <span class="btn-text">🎵 Generate Audio (parallel)</span>
             </button>
-            <button class="btn btn-scene btn-sm" onclick="generateAllScenes(${index})" id="generateAllScenesBtn_${index}">
+            <button class="btn btn-scene btn-sm" onclick="generateAllScenes('${flowId}',${index})" id="generateAllScenesBtn_${fd}_${index}">
               <span class="spinner"></span>
               <span class="btn-text">🖼️ Generate Scenes</span>
             </button>
@@ -2339,74 +2959,82 @@ function createNovelCard(novel, index) {
 
 
 // --- Toggle Manual Review ---
-function toggleManualReview(index) {
-  if (state.reviewedNovels.has(index)) {
-    state.reviewedNovels.delete(index);
+function toggleManualReview(flowId, index) {
+  const flow = getFlow(flowId);
+  if (!flow) return;
+  const fd = flowDomId(flowId);
+  if (flow.reviewedNovels.has(index)) {
+    flow.reviewedNovels.delete(index);
   } else {
-    state.reviewedNovels.add(index);
+    flow.reviewedNovels.add(index);
   }
-  // Re-render the card to show/hide Generate Full Story button
-  const container = document.getElementById('novelsContainer');
-  const card = container.querySelector(`.novel-card[data-index="${index}"]`);
+  const container = document.getElementById(`novelsContainer_${fd}`);
+  const card = container?.querySelector(`.novel-card[data-index="${index}"]`);
   if (card) {
-    const novel = state.novels[index];
+    const novel = flow.novels[index];
     const isExpanded = card.classList.contains('expanded');
-    const newCard = createNovelCard(novel, index);
+    const newCard = createNovelCard(novel, index, flowId);
     newCard.style.animationDelay = card.style.animationDelay;
     if (isExpanded) newCard.classList.add('expanded');
-    // Preserve story section if already generated
-    const existingStorySection = card.querySelector(`#storySection_${index}`);
-    const existingContent = card.querySelector(`#storyContent_${index}`);
-    const existingAudioSection = card.querySelector(`#audioScriptSection_${index}`);
-    const existingSegmentsContainer = card.querySelector(`#audioScriptSegments_${index}`);
+    const existingStorySection = card.querySelector(`#storySection_${fd}_${index}`);
+    const existingContent = card.querySelector(`#storyContent_${fd}_${index}`);
+    const existingAudioSection = card.querySelector(`#audioScriptSection_${fd}_${index}`);
     if (existingStorySection && existingContent?.textContent) {
-      const newStorySection = newCard.querySelector(`#storySection_${index}`);
-      const newContent = newCard.querySelector(`#storyContent_${index}`);
+      const newStorySection = newCard.querySelector(`#storySection_${fd}_${index}`);
+      const newContent = newCard.querySelector(`#storyContent_${fd}_${index}`);
+      const oldAutoReview = card.querySelector(`#autoReviewStory_${fd}_${index}`);
       if (newStorySection && newContent) {
         newContent.textContent = existingContent.textContent;
         newStorySection.style.display = 'block';
+        const newAutoReview = newCard.querySelector(`#autoReviewStory_${fd}_${index}`);
+        if (oldAutoReview && newAutoReview && (oldAutoReview.innerHTML || '').trim()) {
+          newAutoReview.innerHTML = oldAutoReview.innerHTML;
+          newAutoReview.className = oldAutoReview.className;
+          newAutoReview.style.display = oldAutoReview.style.display || 'block';
+        }
       }
-      const btn = newCard.querySelector(`#storyBtn_${index}`);
+      const btn = newCard.querySelector(`#storyBtn_${fd}_${index}`);
       if (btn) {
         btn.innerHTML = '<span class="btn-text">✅ Story Generated</span>';
         btn.disabled = true;
       }
     }
-    if (existingAudioSection && state.audioScriptSegments[index]?.length) {
+    if (existingAudioSection && flow.audioScriptSegments[index]?.length) {
       const textEls = card.querySelectorAll(`.script-segment-text[data-audio-index="${index}"]`);
       textEls.forEach(el => {
         const sIdx = parseInt(el.dataset.segmentIndex, 10);
-        if (!isNaN(sIdx)) syncAudioSegmentEdit(index, sIdx, el.textContent || '');
+        if (!isNaN(sIdx)) syncAudioSegmentEdit(flowId, index, sIdx, el.textContent || '');
       });
-      const newAudioSection = newCard.querySelector(`#audioScriptSection_${index}`);
-      const newSegmentsContainer = newCard.querySelector(`#audioScriptSegments_${index}`);
+      const newAudioSection = newCard.querySelector(`#audioScriptSection_${fd}_${index}`);
+      const newSegmentsContainer = newCard.querySelector(`#audioScriptSegments_${fd}_${index}`);
       if (newAudioSection && newSegmentsContainer) {
         newAudioSection.style.display = 'block';
-        renderAudioScriptSegments(index, newSegmentsContainer, state.audioScriptSegments[index]);
+        renderAudioScriptSegments(flowId, index, newSegmentsContainer, flow.audioScriptSegments[index]);
       }
     }
     card.replaceWith(newCard);
-    attachEditSyncListeners(container);
+    attachEditSyncListeners(container, flowId);
   }
   showToast(
-    state.reviewedNovels.has(index)
+    flow.reviewedNovels.has(index)
       ? 'Template marked as passed manual review. You can now generate the full story.'
       : 'Manual review revoked.',
     'info'
   );
 
-  // Card rerender may drop the cover thumb.
-  try { ensureCoverThumbInCard(index); } catch (_) {}
+  try { ensureCoverThumbInCard(flowId, index); } catch (_) {}
 }
 
 // --- Sync edits from contenteditable back to state ---
-function attachEditSyncListeners(container) {
-  if (!container) return;
+function attachEditSyncListeners(container, flowId) {
+  if (!container || !flowId) return;
+  const flow = getFlow(flowId);
+  if (!flow) return;
 
   const syncEditable = (el) => {
     const chapterItem = el.closest('.chapter-item');
     const novelIndex = parseInt(el.dataset.novel ?? chapterItem?.dataset.novel, 10);
-    if (isNaN(novelIndex) || !state.novels[novelIndex]) return;
+    if (isNaN(novelIndex) || !flow.novels[novelIndex]) return;
 
     const field = el.dataset.field;
     const value = el.textContent?.trim() || '';
@@ -2417,11 +3045,11 @@ function attachEditSyncListeners(container) {
         const list = raw
           ? normalizeTagList(raw.split(/[,|;]|\n/).map(t => t.trim()).filter(Boolean))
           : [];
-        state.novels[novelIndex].tags = list;
-        state.novels[novelIndex].themes = list.slice();
-        state.novels[novelIndex].tag = list.length ? list.join(', ') : '';
+        flow.novels[novelIndex].tags = list;
+        flow.novels[novelIndex].themes = list.slice();
+        flow.novels[novelIndex].tag = list.length ? list.join(', ') : '';
       } else {
-        state.novels[novelIndex][field] = value;
+        flow.novels[novelIndex][field] = value;
       }
       if (field === 'title') {
         const titleEl = container.querySelector(`.novel-card[data-index="${novelIndex}"] .novel-card-header .novel-title`);
@@ -2429,8 +3057,8 @@ function attachEditSyncListeners(container) {
       }
       if (field === 'genre' && value.includes(' | ')) {
         const parts = value.split(' | ');
-        state.novels[novelIndex].genre = (parts[0] || '').trim();
-        state.novels[novelIndex].themes = (parts[1] || '')
+        flow.novels[novelIndex].genre = (parts[0] || '').trim();
+        flow.novels[novelIndex].themes = (parts[1] || '')
           .split(/[·•]/)
           .map(t => t.trim())
           .filter(Boolean);
@@ -2440,7 +3068,7 @@ function attachEditSyncListeners(container) {
     const chapterIndex = chapterItem?.dataset.chapterindex;
     if (chapterIndex !== undefined) {
       const chIndex = parseInt(chapterIndex, 10);
-      const novel = state.novels[novelIndex];
+      const novel = flow.novels[novelIndex];
       if (novel.chapters && novel.chapters[chIndex]) {
         const f = el.dataset.field;
         if (f === 'chapterTitle') {
@@ -2448,7 +3076,6 @@ function attachEditSyncListeners(container) {
         } else if (f === 'chapterSummary') {
           novel.chapters[chIndex].summary = value;
         } else {
-          // Back-compat: old combined format "title — summary"
           const parts = value.split(' — ');
           novel.chapters[chIndex].title = (parts[0] || '').trim();
           novel.chapters[chIndex].summary = (parts[1] || '').trim();
@@ -2459,9 +3086,8 @@ function attachEditSyncListeners(container) {
     const charIndex = el.dataset.charindex;
     if (charIndex !== undefined) {
       const cIndex = parseInt(charIndex, 10);
-      const novel = state.novels[novelIndex];
+      const novel = flow.novels[novelIndex];
       if (novel.characters && novel.characters[cIndex]) {
-        // Best-effort parse: "Name (role, age) — description. Arc: arc"
         const text = value;
         const match = text.match(/^(.+?)\s*\(([^)]*)\)\s*[—–-]\s*(.+)$/s);
         if (match) {
@@ -2491,18 +3117,18 @@ function attachEditSyncListeners(container) {
       const segmentIndex = el.dataset.segmentIndex;
       if (storyIndex !== undefined) {
         const idx = parseInt(storyIndex, 10);
-        if (!isNaN(idx)) state.stories[idx] = el.textContent || '';
+        if (!isNaN(idx)) flow.stories[idx] = el.textContent || '';
         return;
       }
       if (audioIndex !== undefined && segmentIndex !== undefined) {
         const aIdx = parseInt(audioIndex, 10);
         const sIdx = parseInt(segmentIndex, 10);
-        if (!isNaN(aIdx) && !isNaN(sIdx)) syncAudioSegmentEdit(aIdx, sIdx, el.textContent || '');
+        if (!isNaN(aIdx) && !isNaN(sIdx)) syncAudioSegmentEdit(flowId, aIdx, sIdx, el.textContent || '');
         return;
       }
       if (audioIndex !== undefined && segmentIndex === undefined) {
         const idx = parseInt(audioIndex, 10);
-        if (!isNaN(idx)) state.audioScripts[idx] = el.textContent || '';
+        if (!isNaN(idx)) flow.audioScripts[idx] = el.textContent || '';
         return;
       }
       if (el.dataset.novel !== undefined || el.closest('.chapter-item[data-novel]') || el.dataset.charindex !== undefined) {
@@ -2514,7 +3140,6 @@ function attachEditSyncListeners(container) {
   container.addEventListener('input', (e) => {
     const el = e.target;
     if (el.isContentEditable && el.dataset.field === 'title') {
-      // Live-update header title when editing in body (if there's another instance)
       const novelIndex = parseInt(el.dataset.novel, 10);
       if (!isNaN(novelIndex)) {
         const headerTitle = container.querySelector(`.novel-card[data-index="${novelIndex}"] .novel-card-header .novel-title`);
@@ -2526,22 +3151,27 @@ function attachEditSyncListeners(container) {
   }, true);
 }
 
+
 // --- Toggle Card ---
-function toggleNovelCard(index) {
-  const cards = document.querySelectorAll('.novel-card');
-  cards.forEach((card) => {
-    if (parseInt(card.dataset.index) === index) {
+function toggleNovelCard(flowId, index) {
+  const fd = flowDomId(flowId);
+  const panel = document.getElementById(`flowPanel_${fd}`);
+  if (!panel) return;
+  panel.querySelectorAll('.novel-card').forEach((card) => {
+    if (parseInt(card.dataset.index, 10) === index) {
       card.classList.toggle('expanded');
     }
   });
 }
 
 // --- Download ---
-function downloadNovel(index) {
-  const novel = state.novels[index];
+function downloadNovel(flowId, index) {
+  const flow = getFlow(flowId);
+  if (!flow) return;
+  const novel = flow.novels[index];
   if (!novel) return;
 
-  const content = formatNovelTxt(novel, index);
+  const content = formatNovelTxt(flowId, novel, index);
   const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -2555,23 +3185,25 @@ function downloadNovel(index) {
 }
 
 function handleDownloadAll() {
-  if (!state.novels.length) {
+  const flow = ensureActiveFlow();
+  if (!flow.novels.length) {
     showToast('No novels to download', 'error');
     return;
   }
-  state.novels.forEach((_, i) => {
-    setTimeout(() => downloadNovel(i), i * 300);
+  const fid = state.activeFlowId;
+  flow.novels.forEach((_, i) => {
+    setTimeout(() => downloadNovel(fid, i), i * 300);
   });
 }
 
-function formatNovelTxt(novel, index) {
+function formatNovelTxt(flowId, novel, index) {
   let txt = '';
   txt += `${'='.repeat(60)}\n`;
   txt += `  NOVEL TEMPLATE #${index + 1}\n`;
   txt += `${'='.repeat(60)}\n\n`;
 
   txt += `TITLE: ${novel.title || 'Untitled'}\n`;
-  txt += `DESCRIPTION: ${clampText(novel.synopsis || 'N/A', 100)}\n`;
+  txt += `DESCRIPTION (short): ${clampText(novel.synopsis || 'N/A', 100)}\n`;
   txt += `GENRE: ${novel.genre || 'N/A'}\n`;
   txt += `AUTHOR: ${novel.authorName || 'N/A'}\n`;
   txt += `RELEASE DATE: ${novel.releaseDate || 'N/A'}\n`;
@@ -2585,7 +3217,12 @@ function formatNovelTxt(novel, index) {
   }
 
   txt += `\n${'-'.repeat(40)}\n`;
-  txt += `SYNOPSIS\n`;
+  txt += `OVERVIEW (full meaning)\n`;
+  txt += `${'-'.repeat(40)}\n`;
+  txt += `${novel.overview || novel.synopsis || 'N/A'}\n`;
+
+  txt += `\n${'-'.repeat(40)}\n`;
+  txt += `TAGLINE / SHORT SYNOPSIS\n`;
   txt += `${'-'.repeat(40)}\n`;
   txt += `${novel.synopsis || 'N/A'}\n`;
 
@@ -2633,7 +3270,7 @@ function formatNovelTxt(novel, index) {
     txt += 'N/A\n';
   }
 
-  const fullStory = getFullStoryText(index);
+  const fullStory = getFullStoryText(flowId, index);
   if (fullStory) {
     txt += `\n${'-'.repeat(40)}\n`;
     txt += `FULL STORY (BY CHAPTER)\n`;
@@ -2699,17 +3336,19 @@ function toggleSection(sectionId) {
   card.classList.toggle('open', isHidden);
 }
 
-// --- Generate All Stories (for all reviewed templates that don't have a story yet) ---
-async function handleGenerateAllStories() {
-  // If user didn't mark manual review, still allow generating for all templates.
-  const eligible = (state.reviewedNovels.size ? [...state.reviewedNovels] : (state.novels || []).map((_, i) => i))
+// --- Generate All Stories (parallel: multiple novels at once, keyed workers) ---
+async function handleGenerateAllStories(targetFlowId) {
+  const flowId = targetFlowId != null ? targetFlowId : state.activeFlowId;
+  const flow = getFlow(flowId);
+  if (!flow) return;
+  const eligible = (flow.reviewedNovels.size ? [...flow.reviewedNovels] : (flow.novels || []).map((_, i) => i))
     .filter(i => {
-      const novel = state.novels?.[i];
-      if (!state.stories[i]) return true;
-      return !storyIsCompleteForNovel(i, novel);
+      const novel = flow.novels?.[i];
+      if (!flow.stories[i]) return true;
+      return !storyIsCompleteForNovel(flowId, i, novel);
     });
   if (!eligible.length) {
-    showToast(state.reviewedNovels.size === 0
+    showToast(flow.reviewedNovels.size === 0
       ? 'All templates already have complete stories'
       : 'All reviewed templates already have complete stories',
     'info');
@@ -2728,12 +3367,13 @@ async function handleGenerateAllStories() {
   btn.disabled = true;
 
   const queue = eligible.slice();
-  const workerCount = Math.max(1, Math.min(keys.length, queue.length));
+  const keyCount = keys.length;
+  const workerCount = Math.max(1, Math.min(8, queue.length, Math.max(keyCount * 2, 4)));
   let done = 0;
   const total = eligible.length;
   const failed = [];
 
-  showToast(`Generating ${total} stories in parallel (${workerCount} flows)...`, 'info');
+  showToast(`Generating ${total} stories in parallel (${workerCount} concurrent workers)...`, 'info');
 
   const worker = async (workerIdx) => {
     const key = keys[workerIdx % keys.length];
@@ -2741,7 +3381,7 @@ async function handleGenerateAllStories() {
       const index = queue.shift();
       if (index == null) break;
       try {
-        await generateFullStory(index, key);
+        await generateFullStory(flowId, index, key, { silent: true });
         done++;
         showToast(`Stories: ${done}/${total}`, 'info');
         await new Promise(r => setTimeout(r, 80));
@@ -2764,20 +3404,27 @@ async function handleGenerateAllStories() {
 
 // --- Fill missing data (synopsis, chapter outlines) for export table ---
 function novelsNeedingMissingData() {
+  const flow = ensureActiveFlow();
+  const flowId = state.activeFlowId;
   const indices = [];
-  (state.novels || []).forEach((novel, i) => {
+  (flow.novels || []).forEach((novel, i) => {
     const synopsis = safeStr(novel.synopsis);
-    const needsSynopsis = !synopsis || synopsis === 'N/A' || synopsis.length < 50 || synopsis.startsWith('A story:') && synopsis.length < 80;
+    const overview = safeStr(novel.overview);
+    const needsOverview = !overview || overview === 'N/A' || overview.length < 120;
+    const needsSynopsis = !synopsis || synopsis === 'N/A' || synopsis.length < 20 || synopsis.startsWith('A story:') && synopsis.length < 80;
     const chapters = novel.chapters || [];
     const needsChapters = chapters.length < 2 || (chapters.length === 1 && safeStr(chapters[0].summary).length < 50);
-    const needsStoryContent = !storyIsCompleteForNovel(i, novel);
-    if (needsSynopsis || needsChapters || needsStoryContent) indices.push(i);
+    const needsStoryContent = !storyIsCompleteForNovel(flowId, i, novel);
+    if (needsOverview || needsSynopsis || needsChapters || needsStoryContent) indices.push(i);
   });
   return indices;
 }
 
-async function generateMissingDataForNovel(index) {
-  const novel = state.novels[index];
+async function generateMissingDataForNovel(flowId, index) {
+  const flow = getFlow(flowId);
+  if (!flow) return;
+  const fd = flowDomId(flowId);
+  const novel = flow.novels[index];
   if (!novel) return;
   const prompt = `You are a novel template assistant. This novel needs complete template data for export.
 
@@ -2787,13 +3434,15 @@ async function generateMissingDataForNovel(index) {
 ${novel.background ? `**Setting:** ${novel.background.substring(0, 300)}` : ''}
 
 Return valid JSON only (no markdown, no backticks) with exactly these fields:
-1. "synopsis" — A SINGLE short hook line, maximum 100 characters (including spaces). No newlines.
-2. "chapters" — An array of 5-10 chapter outlines. Each item: { "chapterNumber": 1, "title": "Short title", "summary": "Short summary" }. CRITICAL: For each chapter, the combined string "title — summary" must be <= 100 characters.
+1. "overview" — 2–5 sentences, full meaning (about 300–800 characters). Plain prose.
+2. "synopsis" — A SINGLE short hook line, maximum 100 characters (including spaces). No newlines.
+3. "chapters" — An array of 5-10 chapter outlines. Each item: { "chapterNumber": 1, "title": "Short title", "summary": "Short summary" }. CRITICAL: For each chapter, the combined string "title — summary" must be <= 100 characters.
 
 Example format:
-{"synopsis": "Short hook here...", "chapters": [{"chapterNumber": 1, "title": "...", "summary": "..."}, ...]}`;
+{"overview": "Long overview...", "synopsis": "Short hook here...", "chapters": [{"chapterNumber": 1, "title": "...", "summary": "..."}, ...]}`;
 
   const result = await callGeminiAPI(prompt);
+  if (result.overview) novel.overview = result.overview;
   if (result.synopsis) novel.synopsis = result.synopsis;
   if (result.chapters && Array.isArray(result.chapters) && result.chapters.length >= 2) {
     novel.chapters = result.chapters.map(ch => ({
@@ -2803,22 +3452,22 @@ Example format:
     })).filter(ch => ch.chapterNumber >= 1).sort((a, b) => a.chapterNumber - b.chapterNumber);
   }
   normalizeNovelsForExport([novel]);
-  const container = document.getElementById('novelsContainer');
+  const container = document.getElementById(`novelsContainer_${fd}`);
   const card = container?.querySelector(`.novel-card[data-index="${index}"]`);
   if (card) {
-    const newCard = createNovelCard(novel, index);
+    const newCard = createNovelCard(novel, index, flowId);
     newCard.classList.add('expanded');
     card.replaceWith(newCard);
-    attachEditSyncListeners(container);
-    ensureCoverThumbInCard(index);
-    if (state.stories[index]) {
-      const storySection = document.getElementById(`storySection_${index}`);
-      const storyContent = document.getElementById(`storyContent_${index}`);
+    attachEditSyncListeners(container, flowId);
+    ensureCoverThumbInCard(flowId, index);
+    if (flow.stories[index]) {
+      const storySection = document.getElementById(`storySection_${fd}_${index}`);
+      const storyContent = document.getElementById(`storyContent_${fd}_${index}`);
       if (storySection && storyContent) {
-        renderStoryChapters(index, state.stories[index]);
+        renderStoryChapters(flowId, index, flow.stories[index]);
         storySection.style.display = 'block';
       }
-      const storyBtn = document.getElementById(`storyBtn_${index}`);
+      const storyBtn = document.getElementById(`storyBtn_${fd}_${index}`);
       if (storyBtn) storyBtn.innerHTML = '<span class="btn-text">✅ Story Generated</span>';
     }
     newCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -2826,6 +3475,8 @@ Example format:
 }
 
 async function handleFillMissingData() {
+  const flowId = state.activeFlowId;
+  const flow = ensureActiveFlow();
   const indices = novelsNeedingMissingData();
   if (!indices.length) {
     showToast('All templates already have synopsis, chapter outlines, and full chapter content.', 'success');
@@ -2843,12 +3494,12 @@ async function handleFillMissingData() {
   let keyCursor = 0;
   for (const i of indices) {
     try {
-      await generateMissingDataForNovel(i);
+      await generateMissingDataForNovel(flowId, i);
       // Also ensure chapter content exists for export (episodeContent).
       const k = keys[keyCursor % keys.length];
       keyCursor++;
-      if (!storyIsCompleteForNovel(i, state.novels?.[i])) {
-        await generateFullStory(i, k);
+      if (!storyIsCompleteForNovel(flowId, i, flow.novels?.[i])) {
+        await generateFullStory(flowId, i, k);
       }
       done++;
       showToast(`Filled ${done}/${indices.length}`, 'info');
@@ -2862,9 +3513,13 @@ async function handleFillMissingData() {
   showToast(`Done. Filled missing data for ${done} novel(s).`, 'success');
 }
 
-// --- Generate Full Story ---
-async function generateFullStory(index, apiKeyOverride) {
-  const novel = state.novels[index];
+// --- Generate Full Story (safe to run for several indices concurrently; batch uses silent: true) ---
+async function generateFullStory(flowId, index, apiKeyOverride, options = {}) {
+  const silent = Boolean(options.silent);
+  const flow = getFlow(flowId);
+  if (!flow) return;
+  const fd = flowDomId(flowId);
+  const novel = flow.novels[index];
   if (!novel) return;
 
   const apiKey = apiKeyOverride || getApiKey();
@@ -2873,19 +3528,21 @@ async function generateFullStory(index, apiKeyOverride) {
     return;
   }
 
-  const btn = document.getElementById(`storyBtn_${index}`);
+  const btn = document.getElementById(`storyBtn_${fd}_${index}`);
   if (btn) {
     btn.classList.add('loading');
     btn.disabled = true;
   }
 
-  // Auto-expand the card to show progress
-  const card = document.querySelector(`.novel-card[data-index="${index}"]`);
+  const panel = document.getElementById(`flowPanel_${fd}`);
+  const card = panel?.querySelector(`.novel-card[data-index="${index}"]`);
   if (card && !card.classList.contains('expanded')) {
     card.classList.add('expanded');
   }
 
-  showToast(`Generating full story for "${novel.title}"... This may take a moment.`, 'info');
+  if (!silent) {
+    showToast(`Generating full story for "${novel.title}"... This may take a moment.`, 'info');
+  }
 
   try {
     // Build chapter details for the prompt
@@ -2899,21 +3556,30 @@ async function generateFullStory(index, apiKeyOverride) {
     let characterDetails = '';
     if (novel.characters && novel.characters.length) {
       characterDetails = novel.characters.map(c =>
-        `- ${c.name} (${c.role}): ${c.description}${c.arc ? ' | Arc: ' + c.arc : ''}`
+        `- ${c.name} (${c.role}${c.gender ? `, ${c.gender}` : ''}): ${c.description}${c.arc ? ' | Arc: ' + c.arc : ''}`
       ).join('\n');
     }
 
-    const storyPrompt = `You are an expert novelist and creative writer. Write the FULL STORY for the following novel.
+    const themesLine = Array.isArray(novel.themes) && novel.themes.length
+      ? novel.themes.join(', ')
+      : 'Not specified';
 
-## NOVEL DETAILS
+    const storyPrompt = `You are an expert novelist and creative writer. Write the FULL STORY for the following novel, expanding the TEMPLATE below into complete chapter prose. Honor the outline, characters, tone, and themes unless you must fix a clear contradiction.
+
+## NOVEL DETAILS (from template)
 **Title:** ${novel.title}
+**Author (byline):** ${novel.authorName || 'Not specified'}
 **Genre:** ${novel.genre || 'Fiction'}
 **Category:** ${novel.category || 'Fiction'}
 **Writing Language:** ${novel.writingLanguage || 'English'}
+**Themes:** ${themesLine}
 **Narrator Tone:** ${novel.narratorTone || 'Third-person omniscient'}
 **Background/Setting:** ${novel.background || 'Not specified'}
 
-## SYNOPSIS
+## OVERVIEW (full meaning — follow this premise)
+${novel.overview || novel.synopsis || 'Not provided'}
+
+## SHORT TAGLINE (listings)
 ${novel.synopsis || 'Not provided'}
 
 ## DRAFT SCRIPT & CORE IDEAS
@@ -2922,11 +3588,11 @@ ${novel.draftScript || 'Not provided'}
 ## CHARACTERS
 ${characterDetails || 'Not specified'}
 
-## CHAPTER OUTLINE
+## CHAPTER OUTLINE (follow this structure and chapter count)
 ${chapterDetails || 'Write 5-10 chapters'}
 
 ## OUTPUT FORMAT (CRITICAL)
-You MUST output the story separated into chapters using EXACT markers like this, for EVERY chapter:
+You MUST output the story separated into chapters using EXACT markers like this, for EVERY chapter in the outline (same count and order as the outline above):
 
 [CHAPTER 1]
 Title: <chapter title>
@@ -2943,18 +3609,21 @@ Rules:
 - Do NOT add meta commentary, notes, or explanations.
 - Chapter prose should be publish-ready, with dialogue and vivid description.
 - Write in ${novel.writingLanguage || 'English'}.
+- Match the number of [CHAPTER n] blocks to the chapter outline (if the outline lists 7 chapters, output 7 blocks).
+- CHARACTER SYNC: Every character listed under CHARACTERS must appear in the story by name (or clear nickname established in prose), with roles and arcs consistent with the template—do not replace them with different people.
+- TEMPLATE FIDELITY: The plot, stakes, and setting must follow the DRAFT SCRIPT & CORE IDEAS and CHAPTER OUTLINE; do not invent an unrelated story.
 `;
 
     const storyText = await callGeminiAPIRawWithKey(storyPrompt, apiKeyOverride);
 
-    // Store the story
-    state.stories[index] = storyText;
+    flow.stories[index] = storyText;
 
-    // Display it
-    const storySection = document.getElementById(`storySection_${index}`);
-    const storyContent = document.getElementById(`storyContent_${index}`);
-    renderStoryChapters(index, storyText);
-    storySection.style.display = 'block';
+    const storySection = document.getElementById(`storySection_${fd}_${index}`);
+    const storyContent = document.getElementById(`storyContent_${fd}_${index}`);
+    renderStoryChapters(flowId, index, storyText);
+    if (storySection) storySection.style.display = 'block';
+
+    void runAutoReviewStoryStep(flowId, index, apiKeyOverride).catch((e) => console.warn('Auto-review story', e));
 
     // Update button
     if (btn) {
@@ -2962,14 +3631,16 @@ Rules:
       btn.classList.remove('loading');
     }
 
-    showToast(`Full story generated for "${novel.title}"!`, 'success');
-    if (storySection) storySection.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    if (!silent) {
+      showToast(`Full story generated for "${novel.title}"!`, 'success');
+      if (storySection) storySection.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
 
   } catch (error) {
     console.error('Story generation error:', error);
     const msg = error?.message || String(error);
     const provider = getAIProvider() === 'deepseek' ? 'DeepSeek' : 'Gemini';
-    showToast(`Story generation failed (${provider}): ${msg}`, 'error');
+    showToast(`Story failed (#${index + 1} ${novel.title || ''}): ${msg} (${provider})`, 'error');
     if (btn) {
       btn.classList.remove('loading');
       btn.disabled = false;
@@ -3111,8 +3782,9 @@ function parseChaptersFromMarkers(text) {
   return chapters;
 }
 
-function renderStoryChapters(index, storyText) {
-  const storyContent = document.getElementById(`storyContent_${index}`);
+function renderStoryChapters(flowId, index, storyText) {
+  const fd = flowDomId(flowId);
+  const storyContent = document.getElementById(`storyContent_${fd}_${index}`);
   if (!storyContent) return;
 
   const chapters = parseChaptersFromMarkers(storyText || '');
@@ -3156,10 +3828,13 @@ function renderStoryChapters(index, storyText) {
 }
 
 // --- Download Full Story (uses current edited content from DOM) ---
-function downloadStory(index) {
-  const novel = state.novels[index];
-  const contentEl = document.getElementById(`storyContent_${index}`);
-  const storyText = contentEl?.textContent?.trim() || state.stories[index];
+function downloadStory(flowId, index) {
+  const flow = getFlow(flowId);
+  if (!flow) return;
+  const fd = flowDomId(flowId);
+  const novel = flow.novels[index];
+  const contentEl = document.getElementById(`storyContent_${fd}_${index}`);
+  const storyText = contentEl?.textContent?.trim() || flow.stories[index];
   if (!novel || !storyText) {
     showToast('No story to download. Generate it first.', 'error');
     return;
@@ -3189,10 +3864,13 @@ function downloadStory(index) {
 }
 
 // --- Generate Audio Drama Script ---
-async function generateAudioDramaScript(index) {
-  const novel = state.novels[index];
-  const contentEl = document.getElementById(`storyContent_${index}`);
-  const storyText = contentEl?.textContent?.trim() || state.stories[index];
+async function generateAudioDramaScript(flowId, index) {
+  const flow = getFlow(flowId);
+  if (!flow) return;
+  const fd = flowDomId(flowId);
+  const novel = flow.novels[index];
+  const contentEl = document.getElementById(`storyContent_${fd}_${index}`);
+  const storyText = contentEl?.textContent?.trim() || flow.stories[index];
   if (!novel || !storyText) {
     showToast('Generate the full story first.', 'error');
     return;
@@ -3204,7 +3882,7 @@ async function generateAudioDramaScript(index) {
     return;
   }
 
-  const btn = document.getElementById(`audioScriptBtn_${index}`);
+  const btn = document.getElementById(`audioScriptBtn_${fd}_${index}`);
   btn.classList.add('loading');
   btn.disabled = true;
   showToast(`Generating audio drama script for "${novel.title}"...`, 'info');
@@ -3242,12 +3920,12 @@ Format rules:
 
     const scriptText = await callGeminiAPIRaw(prompt);
     const segments = scriptText.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-    state.audioScriptSegments[index] = segments;
-    state.audioScripts[index] = scriptText;
+    flow.audioScriptSegments[index] = segments;
+    flow.audioScripts[index] = scriptText;
 
-    const scriptSection = document.getElementById(`audioScriptSection_${index}`);
-    const segmentsContainer = document.getElementById(`audioScriptSegments_${index}`);
-    renderAudioScriptSegments(index, segmentsContainer, segments);
+    const scriptSection = document.getElementById(`audioScriptSection_${fd}_${index}`);
+    const segmentsContainer = document.getElementById(`audioScriptSegments_${fd}_${index}`);
+    renderAudioScriptSegments(flowId, index, segmentsContainer, segments);
     scriptSection.style.display = 'block';
     scriptSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
@@ -3263,9 +3941,11 @@ Format rules:
 }
 
 // --- Find batch key for segment index (batch where segment is first) ---
-function getBatchAudioForSegment(audioIndex, segmentIndex) {
-  const batches = state.generatedAudioBatches[audioIndex] || {};
-  const audio = state.generatedAudio[audioIndex] || {};
+function getBatchAudioForSegment(flowId, audioIndex, segmentIndex) {
+  const flow = getFlow(flowId);
+  if (!flow) return null;
+  const batches = flow.generatedAudioBatches[audioIndex] || {};
+  const audio = flow.generatedAudio[audioIndex] || {};
   for (const [key, indices] of Object.entries(batches)) {
     if (indices[0] === segmentIndex) return { url: audio[key], key, indices };
   }
@@ -3273,33 +3953,37 @@ function getBatchAudioForSegment(audioIndex, segmentIndex) {
 }
 
 // --- Render Audio Script Segments (each editable + Listen + Generate Audio/Scene) ---
-function renderAudioScriptSegments(audioIndex, container, segments) {
+function renderAudioScriptSegments(flowId, audioIndex, container, segments) {
   if (!container) return;
+  const fd = flowDomId(flowId);
+  const flow = getFlow(flowId);
+  if (!flow) return;
   container.innerHTML = '';
-  const audioBlobs = state.generatedAudio[audioIndex] || {};
-  const sceneImages = state.generatedScenes[audioIndex] || {};
+  const audioBlobs = flow.generatedAudio[audioIndex] || {};
+  const sceneImages = flow.generatedScenes[audioIndex] || {};
   (segments || []).forEach((text, i) => {
     const seg = document.createElement('div');
     seg.className = 'script-segment';
     seg.dataset.audioIndex = String(audioIndex);
     seg.dataset.segmentIndex = String(i);
+    seg.dataset.flowId = flowId;
     const isSceneCue = /^\[(SCENE|INT\.|EXT\.)[^\]]*\]/i.test(text);
     const hasAudio = !!audioBlobs[i];
-    const batchInfo = getBatchAudioForSegment(audioIndex, i);
+    const batchInfo = getBatchAudioForSegment(flowId, audioIndex, i);
     const hasBatchAudio = !!batchInfo;
     const hasScene = !!sceneImages[i] && isSceneCue;
     seg.innerHTML = `
       <div class="script-segment-row">
         <span class="segment-num">${i + 1}</span>
         <div class="segment-actions">
-          <button type="button" class="btn btn-icon segment-listen" onclick="listenToSegment(${audioIndex}, ${i})" id="listenBtn_${audioIndex}_${i}" title="Listen (browser TTS)">🔊</button>
-          <button type="button" class="btn btn-icon segment-gen-audio" onclick="generateAudioForSegment(${audioIndex}, ${i})" id="genAudioBtn_${audioIndex}_${i}" title="Generate AI audio">🎵</button>
-          ${isSceneCue ? `<button type="button" class="btn btn-icon segment-gen-scene" onclick="generateSceneForSegment(${audioIndex}, ${i})" id="genSceneBtn_${audioIndex}_${i}" title="Generate scene image">🖼️</button>` : ''}
+          <button type="button" class="btn btn-icon segment-listen" onclick="listenToSegment('${flowId}',${audioIndex}, ${i})" id="listenBtn_${fd}_${audioIndex}_${i}" title="Listen (browser TTS)">🔊</button>
+          <button type="button" class="btn btn-icon segment-gen-audio" onclick="generateAudioForSegment('${flowId}',${audioIndex}, ${i})" id="genAudioBtn_${fd}_${audioIndex}_${i}" title="Generate AI audio">🎵</button>
+          ${isSceneCue ? `<button type="button" class="btn btn-icon segment-gen-scene" onclick="generateSceneForSegment('${flowId}',${audioIndex}, ${i})" id="genSceneBtn_${fd}_${audioIndex}_${i}" title="Generate scene image">🖼️</button>` : ''}
         </div>
-        <div class="script-segment-text editable" contenteditable="true" data-audio-index="${audioIndex}" data-segment-index="${i}">${escapeHtml(text)}</div>
+        <div class="script-segment-text editable" contenteditable="true" data-flow-id="${flowId}" data-audio-index="${audioIndex}" data-segment-index="${i}">${escapeHtml(text)}</div>
       </div>
-      ${hasAudio ? `<div class="segment-generated-audio"><audio controls src="${audioBlobs[i]}" id="audioPlayer_${audioIndex}_${i}"></audio><a href="${audioBlobs[i]}" download="segment_${i + 1}.${getTtsProvider() === 'ai33pro' ? 'mp3' : 'wav'}" class="btn btn-icon">📥</a></div>` : ''}
-      ${hasBatchAudio ? `<div class="segment-generated-audio batch-audio"><span class="batch-label">Segments ${batchInfo.indices[0] + 1}–${batchInfo.indices[batchInfo.indices.length - 1] + 1}</span><audio controls src="${batchInfo.url}" id="audioBatch_${audioIndex}_${i}"></audio><a href="${batchInfo.url}" download="batch_${batchInfo.indices[0] + 1}-${batchInfo.indices[batchInfo.indices.length - 1] + 1}.${getTtsProvider() === 'ai33pro' ? 'mp3' : 'wav'}" class="btn btn-icon">📥</a></div>` : ''}
+      ${hasAudio ? `<div class="segment-generated-audio"><audio controls src="${audioBlobs[i]}" id="audioPlayer_${fd}_${audioIndex}_${i}"></audio><a href="${audioBlobs[i]}" download="segment_${i + 1}.${getTtsProvider() === 'ai33pro' ? 'mp3' : 'wav'}" class="btn btn-icon">📥</a></div>` : ''}
+      ${hasBatchAudio ? `<div class="segment-generated-audio batch-audio"><span class="batch-label">Segments ${batchInfo.indices[0] + 1}–${batchInfo.indices[batchInfo.indices.length - 1] + 1}</span><audio controls src="${batchInfo.url}" id="audioBatch_${fd}_${audioIndex}_${i}"></audio><a href="${batchInfo.url}" download="batch_${batchInfo.indices[0] + 1}-${batchInfo.indices[batchInfo.indices.length - 1] + 1}.${getTtsProvider() === 'ai33pro' ? 'mp3' : 'wav'}" class="btn btn-icon">📥</a></div>` : ''}
       ${hasScene ? `<div class="segment-generated-scene"><img src="${sceneImages[i]}" alt="Scene ${i + 1}"/><a href="${sceneImages[i]}" download="scene_${i + 1}.png" class="btn btn-icon">📥</a></div>` : ''}
     `;
     container.appendChild(seg);
@@ -3307,28 +3991,30 @@ function renderAudioScriptSegments(audioIndex, container, segments) {
 }
 
 // --- TTS: Listen to a single segment ---
-function listenToSegment(audioIndex, segmentIndex) {
-  const segments = state.audioScriptSegments[audioIndex];
+function listenToSegment(flowId, audioIndex, segmentIndex) {
+  const flow = getFlow(flowId);
+  if (!flow) return;
+  const fd = flowDomId(flowId);
+  const segments = flow.audioScriptSegments[audioIndex];
   if (!segments || !segments[segmentIndex]) return;
   const raw = segments[segmentIndex];
   const text = stripTextForTTS(raw);
   if (!text) return;
 
-  // Stop any current speech
   if (state.speakingSegment) {
     speechSynthesis.cancel();
   }
 
   const utterance = new SpeechSynthesisUtterance(text);
-  const novel = state.novels[audioIndex];
+  const novel = flow.novels[audioIndex];
   const lang = (novel?.writingLanguage || 'en').substring(0, 2).toLowerCase();
   const langMap = { vietnamese: 'vi-VN', english: 'en-US', japanese: 'ja-JP', korean: 'ko-KR', chinese: 'zh-CN', french: 'fr-FR', spanish: 'es-ES', german: 'de-DE', portuguese: 'pt-BR', thai: 'th-TH' };
   utterance.lang = langMap[lang] || 'en-US';
   utterance.rate = 1;
   utterance.pitch = 1;
 
-  state.speakingSegment = { audioIndex, segmentIndex };
-  const btn = document.getElementById(`listenBtn_${audioIndex}_${segmentIndex}`);
+  state.speakingSegment = { flowId, audioIndex, segmentIndex };
+  const btn = document.getElementById(`listenBtn_${fd}_${audioIndex}_${segmentIndex}`);
   if (btn) btn.classList.add('playing');
 
   utterance.onend = utterance.onerror = () => {
@@ -3340,12 +4026,13 @@ function listenToSegment(audioIndex, segmentIndex) {
 }
 
 // --- Sync segment edits back to state ---
-function syncAudioSegmentEdit(audioIndex, segmentIndex, newText) {
-  if (!state.audioScriptSegments[audioIndex]) return;
-  const segs = state.audioScriptSegments[audioIndex];
+function syncAudioSegmentEdit(flowId, audioIndex, segmentIndex, newText) {
+  const flow = getFlow(flowId);
+  if (!flow || !flow.audioScriptSegments[audioIndex]) return;
+  const segs = flow.audioScriptSegments[audioIndex];
   if (segmentIndex >= 0 && segmentIndex < segs.length) {
     segs[segmentIndex] = newText;
-    state.audioScripts[audioIndex] = segs.join('\n');
+    flow.audioScripts[audioIndex] = segs.join('\n');
   }
 }
 
@@ -3377,6 +4064,48 @@ function pcmToWavBlob(pcmBase64, sampleRate = 24000) {
   return new Blob([buffer], { type: 'audio/wav' });
 }
 
+/** Parse Gemini TTS generateContent JSON — audio may be inlineData or inline_data, any part index. */
+function geminiTtsResponseToAudioBlob(data) {
+  const parts = data?.candidates?.[0]?.content?.parts || [];
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i];
+    const id = p?.inlineData || p?.inline_data;
+    if (!id?.data) continue;
+    const mime = String(id.mimeType || id.mime_type || '').toLowerCase();
+    const b64 = id.data;
+    try {
+      if (mime.includes('mpeg') || mime.includes('mp3')) {
+        const bin = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+        return new Blob([bin], { type: 'audio/mpeg' });
+      }
+      if (mime.includes('wav') || mime.includes('wave')) {
+        const bin = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+        return new Blob([bin], { type: 'audio/wav' });
+      }
+      if (mime.includes('ogg') || mime.includes('opus')) {
+        const bin = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+        return new Blob([bin], { type: mime.includes('ogg') ? 'audio/ogg' : 'audio/opus' });
+      }
+      return pcmToWavBlob(b64);
+    } catch (e) {
+      console.warn('TTS blob decode fallback to PCM WAV', e);
+      return pcmToWavBlob(b64);
+    }
+  }
+  return null;
+}
+
+function geminiTtsErrorDetail(data) {
+  const c = data?.candidates?.[0];
+  const fr = c?.finishReason;
+  if (fr && fr !== 'STOP' && fr !== 'FINISH_REASON_STOP') {
+    return `TTS stopped: ${fr}`;
+  }
+  const pt = c?.content?.parts;
+  if (!pt?.length) return 'No content parts in TTS response';
+  return 'No audio payload in TTS response (check model and API access)';
+}
+
 // --- Strip cue labels for TTS (narrator won't read [AMB:], [SFX:], etc.) ---
 function stripTextForTTS(text) {
   if (!text?.trim()) return '';
@@ -3392,11 +4121,26 @@ function parseSpeakerFromSegment(segment) {
   return { speaker: m[1].trim().toUpperCase(), text: (m[2] || '').trim() };
 }
 
+// --- Per-novel TTS overrides (from "Suggest TTS voices from template") + Settings defaults ---
+function getTtsVoiceSettingsForNovel(novel) {
+  const narrator = document.getElementById('narratorVoice')?.value || 'Charon';
+  const female = document.getElementById('femaleVoice')?.value || 'Kore';
+  const male = document.getElementById('maleVoice')?.value || 'Puck';
+  const tv = novel?.ttsVoices;
+  if (!tv || typeof tv !== 'object') return { narrator, female, male };
+  return {
+    narrator: tv.narratorVoice || narrator,
+    female: tv.femaleVoice || female,
+    male: tv.maleVoice || male,
+  };
+}
+
 // --- Get voice for segment: narrator vs character (match gender — no male voice for female chars) ---
 function getVoiceForSegment(segmentText, novel) {
   const { speaker } = parseSpeakerFromSegment(segmentText);
+  const v = getTtsVoiceSettingsForNovel(novel);
   if (!speaker || speaker === 'NARRATOR') {
-    return document.getElementById('narratorVoice')?.value || 'Charon';
+    return v.narrator;
   }
   const chars = novel?.characters || [];
   const speakerNorm = speaker.replace(/\s+/g, ' ').toUpperCase();
@@ -3407,12 +4151,12 @@ function getVoiceForSegment(segmentText, novel) {
   });
   const gender = (char?.gender || '').toLowerCase();
   if (gender === 'female') {
-    return document.getElementById('femaleVoice')?.value || 'Kore';
+    return v.female;
   }
   if (gender === 'male') {
-    return document.getElementById('maleVoice')?.value || 'Puck';
+    return v.male;
   }
-  return document.getElementById('narratorVoice')?.value || 'Kore';
+  return v.narrator;
 }
 
 // --- Throttle delay (ms) between TTS API calls to avoid rate limit (15 RPM free tier) ---
@@ -3426,8 +4170,9 @@ function buildAudioBatches(segments, novel) {
     const { speaker } = parseSpeakerFromSegment(raw);
     return speaker || 'NARRATOR';
   };
+  const voiceSet = getTtsVoiceSettingsForNovel(novel);
   const getVoice = (speaker) => {
-    if (!speaker || speaker === 'NARRATOR') return document.getElementById('narratorVoice')?.value || 'Charon';
+    if (!speaker || speaker === 'NARRATOR') return voiceSet.narrator;
     const chars = novel?.characters || [];
     const speakerNorm = speaker.replace(/\s+/g, ' ').toUpperCase();
     const char = chars.find(c => {
@@ -3436,9 +4181,9 @@ function buildAudioBatches(segments, novel) {
       return nameNorm === speakerNorm || speakerNorm.startsWith(nameNorm) || nameNorm.startsWith(speakerNorm);
     });
     const gender = (char?.gender || '').toLowerCase();
-    if (gender === 'female') return document.getElementById('femaleVoice')?.value || 'Kore';
-    if (gender === 'male') return document.getElementById('maleVoice')?.value || 'Puck';
-    return document.getElementById('narratorVoice')?.value || 'Charon';
+    if (gender === 'female') return voiceSet.female;
+    if (gender === 'male') return voiceSet.male;
+    return voiceSet.narrator;
   };
   for (let i = 0; i < segments.length; i++) {
     const raw = segments[i];
@@ -3473,25 +4218,159 @@ async function callAi33TTS(text, voiceName, apiKeyOverride = null) {
   const apiKey = apiKeyOverride || getTtsApiKey();
   if (!apiKey) throw new Error('AI33 Pro API key required. Set it in Settings.');
   const baseUrl = (document.getElementById('ai33BaseUrl')?.value || 'https://api.ai33.pro/v1').replace(/\/$/, '');
-  const url = `${baseUrl}/audio/speech`;
-  const response = await fetch(url, {
+  const normalizedVoice = encodeURIComponent(String(voiceName || 'alloy').trim());
+  const url = `${baseUrl}/text-to-speech/${normalizedVoice}?output_format=mp3_44100_128`;
+  // #region agent log
+  fetch('http://127.0.0.1:7906/ingest/260818ca-86e0-4d11-8830-b6af7bbca1a1', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'db5bb1' }, body: JSON.stringify({ sessionId: 'db5bb1', hypothesisId: 'H7', location: 'app.js:callAi33TTS:pre', message: 'AI33 TTS request v2', data: { baseUrlLen: baseUrl.length, path: '/text-to-speech/{voice_id}', voice: voiceName || 'alloy', inputLen: String(text || '').length, hasKey: !!apiKey, hasOverride: !!apiKeyOverride }, timestamp: Date.now() }) }).catch(() => {});
+  // #endregion
+  // #region agent log
+  fetch('http://127.0.0.1:7906/ingest/260818ca-86e0-4d11-8830-b6af7bbca1a1', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'db5bb1' }, body: JSON.stringify({ sessionId: 'db5bb1', hypothesisId: 'H6', location: 'app.js:callAi33TTS:keyMeta', message: 'AI33 key diagnostics', data: { keyLen: String(apiKey || '').length, hasInnerWhitespace: /\s/.test(String(apiKey || '')), startsWithSk: String(apiKey || '').toLowerCase().startsWith('sk-'), startsWithBearer: String(apiKey || '').toLowerCase().startsWith('bearer '), hasQuote: /["']/.test(String(apiKey || '')) }, timestamp: Date.now() }) }).catch(() => {});
+  // #endregion
+  const response = await fetchWithTimeout(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`,
+      'xi-api-key': apiKey,
     },
     body: JSON.stringify({
-      model: 'tts-1',
-      input: text,
-      voice: voiceName || 'alloy',
-      response_format: 'mp3',
+      text: String(text || '').slice(0, 4096),
+      model_id: 'eleven_multilingual_v2',
+      with_transcript: false,
     }),
-  });
+  }, 120000);
+  // #region agent log
+  fetch('http://127.0.0.1:7906/ingest/260818ca-86e0-4d11-8830-b6af7bbca1a1', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'db5bb1' }, body: JSON.stringify({ sessionId: 'db5bb1', hypothesisId: 'H2', location: 'app.js:callAi33TTS:response', message: 'AI33 HTTP response', data: { ok: response.ok, status: response.status, contentType: (response.headers.get('content-type') || '').slice(0, 80) }, timestamp: Date.now() }) }).catch(() => {});
+  // #endregion
+  // #region agent log
+  fetch('http://127.0.0.1:7906/ingest/260818ca-86e0-4d11-8830-b6af7bbca1a1', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'db5bb1' }, body: JSON.stringify({ sessionId: 'db5bb1', hypothesisId: 'H2', location: 'app.js:callAi33TTS:responseHeaders', message: 'AI33 auth headers', data: { host: (() => { try { return new URL(url).host; } catch (_) { return 'invalid-url'; } })(), path: (() => { try { return new URL(url).pathname; } catch (_) { return ''; } })(), wwwAuthenticate: (response.headers.get('www-authenticate') || '').slice(0, 200), server: (response.headers.get('server') || '').slice(0, 80) }, timestamp: Date.now() }) }).catch(() => {});
+  // #endregion
   if (!response.ok) {
-    const err = await response.json().catch(() => ({}));
-    throw new Error(err?.error?.message || `AI33 TTS error: ${response.status}`);
+    const ct = (response.headers.get('content-type') || '').toLowerCase();
+    let errMsg = `AI33 TTS error: ${response.status}`;
+    if (ct.includes('application/json')) {
+      const err = await response.json().catch(() => ({}));
+      errMsg = err?.error?.message || err?.message || errMsg;
+    } else {
+      const t = await response.text().catch(() => '');
+      if (t && t.length < 800) errMsg = `${errMsg}: ${t.trim().slice(0, 400)}`;
+    }
+    // #region agent log
+    fetch('http://127.0.0.1:7906/ingest/260818ca-86e0-4d11-8830-b6af7bbca1a1', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'db5bb1' }, body: JSON.stringify({ sessionId: 'db5bb1', hypothesisId: 'H4', location: 'app.js:callAi33TTS:error', message: 'AI33 error body', data: { status: response.status, errMsg: String(errMsg).slice(0, 500) }, timestamp: Date.now() }) }).catch(() => {});
+    // #endregion
+    throw new Error(errMsg);
   }
-  return await response.blob();
+  const ct = (response.headers.get('content-type') || '').toLowerCase();
+  if (ct.includes('application/json')) {
+    const json = await response.json().catch(() => ({}));
+    const audioUrl = json?.audio_url || json?.url || json?.data?.audio_url || json?.data?.url || json?.file_url || '';
+    const audioBase64 = json?.audio_base64 || json?.base64 || json?.data?.audio_base64 || '';
+    // #region agent log
+    fetch('http://127.0.0.1:7906/ingest/260818ca-86e0-4d11-8830-b6af7bbca1a1', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'db5bb1' }, body: JSON.stringify({ sessionId: 'db5bb1', hypothesisId: 'H8', location: 'app.js:callAi33TTS:json200', message: 'AI33 JSON success payload', data: { hasAudioUrl: !!audioUrl, hasAudioBase64: !!audioBase64, keys: Object.keys(json || {}).slice(0, 8), dataKeys: Object.keys(json?.data || {}).slice(0, 8) }, timestamp: Date.now() }) }).catch(() => {});
+    // #endregion
+    if (audioBase64) {
+      const bin = Uint8Array.from(atob(audioBase64), c => c.charCodeAt(0));
+      return new Blob([bin], { type: 'audio/mpeg' });
+    }
+    if (audioUrl) {
+      const audioResp = await fetchWithTimeout(audioUrl, { method: 'GET' }, 120000);
+      if (!audioResp.ok) throw new Error(`AI33 audio URL fetch failed: ${audioResp.status}`);
+      const buf2 = await audioResp.arrayBuffer();
+      const ct2 = (audioResp.headers.get('content-type') || '').toLowerCase();
+      const mime2 = ct2.includes('audio/') ? ct2.split(';')[0].trim() : 'audio/mpeg';
+      // #region agent log
+      fetch('http://127.0.0.1:7906/ingest/260818ca-86e0-4d11-8830-b6af7bbca1a1', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'db5bb1' }, body: JSON.stringify({ sessionId: 'db5bb1', hypothesisId: 'H8', location: 'app.js:callAi33TTS:urlAudio', message: 'AI33 fetched audio URL', data: { byteLength: buf2.byteLength, mime: mime2 }, timestamp: Date.now() }) }).catch(() => {});
+      // #endregion
+      return new Blob([buf2], { type: mime2 || 'audio/mpeg' });
+    }
+    if (json?.task_id) {
+      const taskId = String(json.task_id);
+      // #region agent log
+      fetch('http://127.0.0.1:7906/ingest/260818ca-86e0-4d11-8830-b6af7bbca1a1', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'db5bb1' }, body: JSON.stringify({ sessionId: 'db5bb1', hypothesisId: 'H10', location: 'app.js:callAi33TTS:taskAccepted', message: 'AI33 async task accepted', data: { taskIdLen: taskId.length, hasCreditsField: Object.prototype.hasOwnProperty.call(json || {}, 'ec_remain_credits') }, timestamp: Date.now() }) }).catch(() => {});
+      // #endregion
+      throw new Error(`AI33 accepted async task_id (${taskId}) and did not return direct audio. Configure webhook delivery (receive_url) or use a synchronous endpoint for in-app demo playback.`);
+    }
+    throw new Error(`AI33 returned JSON without audio payload: ${JSON.stringify(json).slice(0, 220)}`);
+  }
+  const buf = await response.arrayBuffer();
+  const mime = ct.includes('audio/') ? ct.split(';')[0].trim() : 'audio/mpeg';
+  // #region agent log
+  fetch('http://127.0.0.1:7906/ingest/260818ca-86e0-4d11-8830-b6af7bbca1a1', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'db5bb1' }, body: JSON.stringify({ sessionId: 'db5bb1', hypothesisId: 'H3', location: 'app.js:callAi33TTS:success', message: 'AI33 audio body', data: { byteLength: buf.byteLength, mime }, timestamp: Date.now() }) }).catch(() => {});
+  // #endregion
+  return new Blob([buf], { type: mime || 'audio/mpeg' });
+}
+
+
+const TTS_VOICE_DEMO_PHRASES = {
+  narratorVoice: 'This is the narrator voice sample.',
+  femaleVoice: 'Hello, this is the female character voice sample.',
+  maleVoice: 'Hello, this is the male character voice sample.',
+};
+
+function stopTtsVoiceDemoPlayback() {
+  if (!state.ttsDemoPlayback) return;
+  try {
+    state.ttsDemoPlayback.audio.pause();
+  } catch (_) {}
+  state.ttsDemoPlayback.audio.removeAttribute('src');
+  URL.revokeObjectURL(state.ttsDemoPlayback.url);
+  state.ttsDemoPlayback = null;
+}
+
+/** Preview the selected voice in Settings using the same TTS provider as chapter audio. */
+async function playTtsVoiceDemo(selectId) {
+  const keys = getTtsApiKeys();
+  // #region agent log
+  fetch('http://127.0.0.1:7906/ingest/260818ca-86e0-4d11-8830-b6af7bbca1a1', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'db5bb1' }, body: JSON.stringify({ sessionId: 'db5bb1', hypothesisId: 'H1', location: 'app.js:playTtsVoiceDemo:entry', message: 'demo entry', data: { provider: getTtsProvider(), keysLen: keys.length, selectId }, timestamp: Date.now() }) }).catch(() => {});
+  // #endregion
+  if (!keys.length) {
+    showToast(ttsKeyMissingMessage(), 'error');
+    return;
+  }
+  const voiceName = document.getElementById(selectId)?.value;
+  if (!voiceName) return;
+  const phrase = TTS_VOICE_DEMO_PHRASES[selectId] || 'Voice preview.';
+  const btn = document.getElementById(`demoVoice_${selectId}`);
+  stopTtsVoiceDemoPlayback();
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '…';
+  }
+  try {
+    // #region agent log
+    fetch('http://127.0.0.1:7906/ingest/260818ca-86e0-4d11-8830-b6af7bbca1a1', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'db5bb1' }, body: JSON.stringify({ sessionId: 'db5bb1', hypothesisId: 'H5', location: 'app.js:playTtsVoiceDemo:preTts', message: 'calling TTS', data: { voiceName, phraseLen: phrase.length }, timestamp: Date.now() }) }).catch(() => {});
+    // #endregion
+    const blob = await callGeminiTTSMultiSpeaker(`NARRATOR: ${phrase}`, { NARRATOR: voiceName });
+    // #region agent log
+    fetch('http://127.0.0.1:7906/ingest/260818ca-86e0-4d11-8830-b6af7bbca1a1', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'db5bb1' }, body: JSON.stringify({ sessionId: 'db5bb1', hypothesisId: 'H3', location: 'app.js:playTtsVoiceDemo:blob', message: 'blob before play', data: { size: blob?.size, type: blob?.type || '' }, timestamp: Date.now() }) }).catch(() => {});
+    // #endregion
+    const url = URL.createObjectURL(blob);
+    const audio = new Audio(url);
+    state.ttsDemoPlayback = { audio, url };
+    audio.onended = () => {
+      stopTtsVoiceDemoPlayback();
+    };
+    audio.onerror = () => {
+      stopTtsVoiceDemoPlayback();
+      showToast('Could not play audio preview.', 'error');
+    };
+    await audio.play().catch((err) => {
+      // #region agent log
+      fetch('http://127.0.0.1:7906/ingest/260818ca-86e0-4d11-8830-b6af7bbca1a1', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'db5bb1' }, body: JSON.stringify({ sessionId: 'db5bb1', hypothesisId: 'H3', location: 'app.js:playTtsVoiceDemo:playCatch', message: 'audio.play rejected', data: { err: String(err?.message || err) }, timestamp: Date.now() }) }).catch(() => {});
+      // #endregion
+      stopTtsVoiceDemoPlayback();
+      showToast(`Playback failed: ${err?.message || err}`, 'error');
+    });
+  } catch (e) {
+    // #region agent log
+    fetch('http://127.0.0.1:7906/ingest/260818ca-86e0-4d11-8830-b6af7bbca1a1', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'db5bb1' }, body: JSON.stringify({ sessionId: 'db5bb1', hypothesisId: 'H2', location: 'app.js:playTtsVoiceDemo:catch', message: 'demo catch', data: { err: String(e?.message || e) }, timestamp: Date.now() }) }).catch(() => {});
+    // #endregion
+    stopTtsVoiceDemoPlayback();
+    showToast(`Demo failed: ${e.message || e}`, 'error');
+  }
+  if (btn) {
+    btn.disabled = false;
+    btn.textContent = '▶ Demo';
+  }
 }
 
 // --- Call Gemini Multi-Speaker TTS (batch = fewer API calls) ---
@@ -3500,10 +4379,14 @@ async function callGeminiTTSMultiSpeaker(prompt, voiceMap, apiKeyOverride = null
     const speakers = Object.keys(voiceMap);
     const voice = voiceMap[speakers[0]] || 'alloy';
     const cleanPrompt = prompt.replace(/^[A-Z\s]+:\s*/gm, '').trim();
+    // #region agent log
+    fetch('http://127.0.0.1:7906/ingest/260818ca-86e0-4d11-8830-b6af7bbca1a1', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'db5bb1' }, body: JSON.stringify({ sessionId: 'db5bb1', hypothesisId: 'H5', location: 'app.js:callGeminiTTSMultiSpeaker:ai33', message: 'AI33 branch', data: { firstSpeaker: speakers[0], voice, cleanLen: cleanPrompt.length }, timestamp: Date.now() }) }).catch(() => {});
+    // #endregion
     return callAi33TTS(cleanPrompt, voice, apiKeyOverride);
   }
   const apiKey = apiKeyOverride || getTtsApiKey();
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`;
+  if (!apiKey) throw new Error('No TTS API key. Add a key in Settings (TTS API Key or Gemini key).');
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${encodeURIComponent(apiKey)}`;
   const speakers = Object.keys(voiceMap);
   if (speakers.length === 0) throw new Error('No speakers');
   if (speakers.length === 1) {
@@ -3525,9 +4408,9 @@ async function callGeminiTTSMultiSpeaker(prompt, voiceMap, apiKeyOverride = null
       throw new Error(err?.error?.message || `TTS API error: ${response.status}`);
     }
     const data = await response.json();
-    const b64 = data.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-    if (!b64) throw new Error('No audio in TTS response');
-    return pcmToWavBlob(b64);
+    const blob = geminiTtsResponseToAudioBlob(data);
+    if (!blob) throw new Error(geminiTtsErrorDetail(data));
+    return blob;
   }
   const speakerVoiceConfigs = speakers.map(speaker => ({
     speaker,
@@ -3551,9 +4434,9 @@ async function callGeminiTTSMultiSpeaker(prompt, voiceMap, apiKeyOverride = null
     throw new Error(err?.error?.message || `TTS API error: ${response.status}`);
   }
   const data = await response.json();
-  const b64 = data.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-  if (!b64) throw new Error('No audio in TTS response');
-  return pcmToWavBlob(b64);
+  const blob = geminiTtsResponseToAudioBlob(data);
+  if (!blob) throw new Error(geminiTtsErrorDetail(data));
+  return blob;
 }
 
 // --- Call Gemini TTS API (single segment) ---
@@ -3565,7 +4448,8 @@ async function callGeminiTTS(text, novel, segmentRaw = null) {
     return callAi33TTS(cleaned, voiceName);
   }
   const apiKey = getTtsApiKey();
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`;
+  if (!apiKey) throw new Error('No TTS API key. Add a key in Settings.');
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${encodeURIComponent(apiKey)}`;
   const tone = novel?.narratorTone || '';
   const background = novel?.background || '';
   const styleHint = [tone, background].filter(Boolean).join('. ');
@@ -3590,9 +4474,9 @@ async function callGeminiTTS(text, novel, segmentRaw = null) {
     throw new Error(err?.error?.message || `TTS API error: ${response.status}`);
   }
   const data = await response.json();
-  const b64 = data.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-  if (!b64) throw new Error('No audio in TTS response');
-  return pcmToWavBlob(b64);
+  const blob = geminiTtsResponseToAudioBlob(data);
+  if (!blob) throw new Error(geminiTtsErrorDetail(data));
+  return blob;
 }
 
 // --- Gemini Imagen: thumbnail/cover generation (when AI provider is Gemini and key set) ---
@@ -3654,9 +4538,10 @@ async function callFreeImageAPI(prompt, novel) {
   }
   const tone = novel?.narratorTone || '';
   const background = novel?.background || '';
-  const styleHint = [tone, background].filter(Boolean).join('. ');
+  const draftBit = safeStr(novel?.draftScript).slice(0, 320);
+  const styleHint = [tone, background, draftBit].filter(Boolean).join('. ');
   const fullPrompt = styleHint
-    ? `Scene image, style: ${styleHint}. ${prompt}. Digital art, high quality, atmospheric.`
+    ? `Book cover scene inspired by story: ${styleHint}. ${prompt}. Digital art, high quality, show title if requested in prompt.`
     : `Scene image: ${prompt}. Digital art, high quality, atmospheric.`;
   const url = 'https://t2i.mcpcore.xyz/api/free/generate';
   let response;
@@ -3715,12 +4600,8 @@ async function callFreeImageAPI(prompt, novel) {
 // --- Unified image generation: Gemini Imagen when a Gemini key is available (Gemini or DeepSeek + Gemini key); else free API ---
 // genOptions: { aspectRatio: '3:4' } for novel thumbnails. DeepSeek has no image API; we use Gemini key from Settings (Gemini key for TTS) when provider is DeepSeek.
 async function callImageGenerationAPI(prompt, novel, genOptions = {}) {
-  const fullPrompt = `Book cover illustration for a novel. No text, no typography, no watermark.
-Title concept: "${novel?.title || 'Untitled'}".
-Genre: ${novel?.genre || novel?.category || 'Fiction'}.
-Setting/background: ${novel?.background || 'not specified'}.
-Main mood/tone: ${novel?.narratorTone || ''}.
-Composition: centered subject, cinematic lighting, high detail, professional cover art.`;
+  const core = getNovelCoreIdeasForImage(novel, 700);
+  const fullPrompt = `Book cover with readable title typography: "${novel?.title || 'Untitled'}". Artwork inspired by the story:\n${core}\nGenre: ${novel?.genre || novel?.category || 'Fiction'}. Mood: ${novel?.narratorTone || 'cinematic'}. Professional cover art, no watermarks.`;
   const effectivePrompt = prompt && prompt.length > 50 ? prompt : fullPrompt;
   const geminiKey = getGeminiKeyForImages();
   if (geminiKey) {
@@ -3740,24 +4621,31 @@ Composition: centered subject, cinematic lighting, high detail, professional cov
 }
 
 // --- Generate Audio for a single segment ---
-async function generateAudioForSegment(audioIndex, segmentIndex) {
-  const segments = state.audioScriptSegments[audioIndex];
-  const raw = document.querySelector(`.script-segment-text[data-audio-index="${audioIndex}"][data-segment-index="${segmentIndex}"]`)?.textContent?.trim() || segments?.[segmentIndex];
+async function generateAudioForSegment(flowId, audioIndex, segmentIndex) {
+  const flow = getFlow(flowId);
+  if (!flow) return;
+  const fd = flowDomId(flowId);
+  const segments = flow.audioScriptSegments[audioIndex];
+  const raw = document.querySelector(`#flowPanel_${fd} .script-segment-text[data-flow-id="${flowId}"][data-audio-index="${audioIndex}"][data-segment-index="${segmentIndex}"]`)?.textContent?.trim() || segments?.[segmentIndex];
   const text = stripTextForTTS(raw);
   if (!text) {
     showToast('Segment has no speakable content (cue-only).', 'error');
     return;
   }
-  const novel = state.novels[audioIndex];
-  const btn = document.getElementById(`genAudioBtn_${audioIndex}_${segmentIndex}`);
+  const novel = flow.novels[audioIndex];
+  const btn = document.getElementById(`genAudioBtn_${fd}_${audioIndex}_${segmentIndex}`);
+  if (!getTtsApiKeys().length) {
+    showToast(ttsKeyMissingMessage(), 'error');
+    return;
+  }
   if (btn) { btn.disabled = true; btn.textContent = '⏳'; }
   try {
     const blob = await callGeminiTTS(text, novel, raw);
     const url = URL.createObjectURL(blob);
-    if (!state.generatedAudio[audioIndex]) state.generatedAudio[audioIndex] = {};
-    state.generatedAudio[audioIndex][segmentIndex] = url;
-    const container = document.getElementById(`audioScriptSegments_${audioIndex}`);
-    renderAudioScriptSegments(audioIndex, container, state.audioScriptSegments[audioIndex]);
+    if (!flow.generatedAudio[audioIndex]) flow.generatedAudio[audioIndex] = {};
+    flow.generatedAudio[audioIndex][segmentIndex] = url;
+    const container = document.getElementById(`audioScriptSegments_${fd}_${audioIndex}`);
+    renderAudioScriptSegments(flowId, audioIndex, container, flow.audioScriptSegments[audioIndex]);
     showToast(`Audio generated for segment ${segmentIndex + 1}`, 'success');
   } catch (e) {
     showToast(`Audio failed: ${e.message}`, 'error');
@@ -3766,23 +4654,28 @@ async function generateAudioForSegment(audioIndex, segmentIndex) {
 }
 
 // --- Generate All Audio (batched + parallel across multiple API keys) ---
-async function generateAllAudio(audioIndex) {
-  const novel = state.novels[audioIndex];
-  const segments = state.audioScriptSegments[audioIndex];
+async function generateAllAudio(flowId, audioIndex) {
+  const flow = getFlow(flowId);
+  if (!flow) return;
+  const fd = flowDomId(flowId);
+  const novel = flow.novels[audioIndex];
+  const segments = flow.audioScriptSegments[audioIndex];
   if (!novel || !segments?.length) {
     showToast('No script segments to generate audio from.', 'error');
     return;
   }
   const keys = getTtsApiKeys();
-  if (!keys.length) { showToast('TTS requires API key(s). Configure in Settings.', 'error'); return; }
-  const btn = document.getElementById(`generateAllAudioBtn_${audioIndex}`);
+  if (!keys.length) {
+    showToast(ttsKeyMissingMessage(), 'error');
+    return;
+  }
+  const btn = document.getElementById(`generateAllAudioBtn_${fd}_${audioIndex}`);
   btn.classList.add('loading');
   btn.disabled = true;
-  const container = document.getElementById(`audioScriptSegments_${audioIndex}`);
+  const container = document.getElementById(`audioScriptSegments_${fd}_${audioIndex}`);
   const batches = buildAudioBatches(segments, novel);
-  if (!state.generatedAudioBatches[audioIndex]) state.generatedAudioBatches[audioIndex] = {};
+  if (!flow.generatedAudioBatches[audioIndex]) flow.generatedAudioBatches[audioIndex] = {};
 
-  // Distribute batches across keys (parallel workers)
   const batchPerKey = Math.ceil(batches.length / keys.length) || 1;
   const worker = async (keyIndex) => {
     const key = keys[keyIndex];
@@ -3796,11 +4689,11 @@ async function generateAllAudio(audioIndex) {
         const blob = await callGeminiTTSMultiSpeaker(batch.prompt, batch.voiceMap, key);
         const url = URL.createObjectURL(blob);
         const keyName = `batch_${batch.indices[0]}_${batch.indices[batch.indices.length - 1]}`;
-        if (!state.generatedAudio[audioIndex]) state.generatedAudio[audioIndex] = {};
-        state.generatedAudio[audioIndex][keyName] = url;
-        state.generatedAudioBatches[audioIndex][keyName] = batch.indices;
+        if (!flow.generatedAudio[audioIndex]) flow.generatedAudio[audioIndex] = {};
+        flow.generatedAudio[audioIndex][keyName] = url;
+        flow.generatedAudioBatches[audioIndex][keyName] = batch.indices;
         done += batch.indices.length;
-        renderAudioScriptSegments(audioIndex, container, state.audioScriptSegments[audioIndex]);
+        renderAudioScriptSegments(flowId, audioIndex, container, flow.audioScriptSegments[audioIndex]);
         showToast(`Key ${keyIndex + 1}: batch ${b + 1}/${batches.length}`, 'info');
       } catch (e) {
         showToast(`Batch ${b + 1} failed: ${e.message}`, 'error');
@@ -3820,20 +4713,23 @@ async function generateAllAudio(audioIndex) {
 }
 
 // --- Generate Scene for a single segment ---
-async function generateSceneForSegment(audioIndex, segmentIndex) {
-  const segments = state.audioScriptSegments[audioIndex];
-  const text = document.querySelector(`.script-segment-text[data-audio-index="${audioIndex}"][data-segment-index="${segmentIndex}"]`)?.textContent?.trim() || segments?.[segmentIndex];
+async function generateSceneForSegment(flowId, audioIndex, segmentIndex) {
+  const flow = getFlow(flowId);
+  if (!flow) return;
+  const fd = flowDomId(flowId);
+  const segments = flow.audioScriptSegments[audioIndex];
+  const text = document.querySelector(`#flowPanel_${fd} .script-segment-text[data-flow-id="${flowId}"][data-audio-index="${audioIndex}"][data-segment-index="${segmentIndex}"]`)?.textContent?.trim() || segments?.[segmentIndex];
   if (!text) return;
-  const novel = state.novels[audioIndex];
-  const btn = document.getElementById(`genSceneBtn_${audioIndex}_${segmentIndex}`);
+  const novel = flow.novels[audioIndex];
+  const btn = document.getElementById(`genSceneBtn_${fd}_${audioIndex}_${segmentIndex}`);
   if (btn) { btn.disabled = true; btn.textContent = '⏳'; }
   try {
     const sceneDesc = text.replace(/^\[(SCENE|INT\.|EXT\.|SFX|AMB|MUSIC)[^\]]*\]\s*/i, '').trim() || text;
     const dataUrl = await callImageGenerationAPI(sceneDesc, novel);
-    if (!state.generatedScenes[audioIndex]) state.generatedScenes[audioIndex] = {};
-    state.generatedScenes[audioIndex][segmentIndex] = dataUrl;
-    const container = document.getElementById(`audioScriptSegments_${audioIndex}`);
-    renderAudioScriptSegments(audioIndex, container, state.audioScriptSegments[audioIndex]);
+    if (!flow.generatedScenes[audioIndex]) flow.generatedScenes[audioIndex] = {};
+    flow.generatedScenes[audioIndex][segmentIndex] = dataUrl;
+    const container = document.getElementById(`audioScriptSegments_${fd}_${audioIndex}`);
+    renderAudioScriptSegments(flowId, audioIndex, container, flow.audioScriptSegments[audioIndex]);
     showToast(`Scene generated for segment ${segmentIndex + 1}`, 'success');
   } catch (e) {
     showToast(`Scene failed: ${e.message}`, 'error');
@@ -3842,9 +4738,12 @@ async function generateSceneForSegment(audioIndex, segmentIndex) {
 }
 
 // --- Generate All Scenes (for scene-type segments only) ---
-async function generateAllScenes(audioIndex) {
-  const novel = state.novels[audioIndex];
-  const segments = state.audioScriptSegments[audioIndex];
+async function generateAllScenes(flowId, audioIndex) {
+  const flow = getFlow(flowId);
+  if (!flow) return;
+  const fd = flowDomId(flowId);
+  const novel = flow.novels[audioIndex];
+  const segments = flow.audioScriptSegments[audioIndex];
   if (!novel || !segments?.length) return;
   const sceneIndices = segments
     .map((t, i) => (/^\[(SCENE|INT\.|EXT\.)[^\]]*\]/i.test(t) ? i : -1))
@@ -3855,19 +4754,19 @@ async function generateAllScenes(audioIndex) {
   }
   const apiKey = getApiKey();
   if (!apiKey) { showToast('Please enter your Gemini API key.', 'error'); return; }
-  const btn = document.getElementById(`generateAllScenesBtn_${audioIndex}`);
+  const btn = document.getElementById(`generateAllScenesBtn_${fd}_${audioIndex}`);
   btn.classList.add('loading');
   btn.disabled = true;
-  const container = document.getElementById(`audioScriptSegments_${audioIndex}`);
+  const container = document.getElementById(`audioScriptSegments_${fd}_${audioIndex}`);
   let done = 0;
   for (const i of sceneIndices) {
-    const text = document.querySelector(`.script-segment-text[data-audio-index="${audioIndex}"][data-segment-index="${i}"]`)?.textContent?.trim() || segments[i];
+    const text = document.querySelector(`#flowPanel_${fd} .script-segment-text[data-flow-id="${flowId}"][data-audio-index="${audioIndex}"][data-segment-index="${i}"]`)?.textContent?.trim() || segments[i];
     const sceneDesc = text.replace(/^\[(SCENE|INT\.|EXT\.)[^\]]*\]\s*/i, '').trim() || text;
     try {
       const dataUrl = await callImageGenerationAPI(sceneDesc, novel);
-      if (!state.generatedScenes[audioIndex]) state.generatedScenes[audioIndex] = {};
-      state.generatedScenes[audioIndex][i] = dataUrl;
-      renderAudioScriptSegments(audioIndex, container, state.audioScriptSegments[audioIndex]);
+      if (!flow.generatedScenes[audioIndex]) flow.generatedScenes[audioIndex] = {};
+      flow.generatedScenes[audioIndex][i] = dataUrl;
+      renderAudioScriptSegments(flowId, audioIndex, container, flow.audioScriptSegments[audioIndex]);
       done++;
       showToast(`Scene ${done}/${sceneIndices.length}`, 'info');
     } catch (e) {
@@ -3880,20 +4779,22 @@ async function generateAllScenes(audioIndex) {
 }
 
 // --- Download Audio Drama Script ---
-function downloadAudioScript(index) {
-  const novel = state.novels[index];
-  // Sync any unsaved edits from DOM before download
-  const textEls = document.querySelectorAll(`.script-segment-text[data-audio-index="${index}"]`);
+function downloadAudioScript(flowId, index) {
+  const flow = getFlow(flowId);
+  if (!flow) return;
+  const fd = flowDomId(flowId);
+  const novel = flow.novels[index];
+  const textEls = document.querySelectorAll(`#flowPanel_${fd} .script-segment-text[data-audio-index="${index}"]`);
   if (textEls.length) {
-    const segs = [...(state.audioScriptSegments[index] || [])];
+    const segs = [...(flow.audioScriptSegments[index] || [])];
     textEls.forEach(el => {
       const sIdx = parseInt(el.dataset.segmentIndex, 10);
       if (!isNaN(sIdx)) segs[sIdx] = el.textContent || '';
     });
-    state.audioScriptSegments[index] = segs;
+    flow.audioScriptSegments[index] = segs;
   }
-  const segments = state.audioScriptSegments[index];
-  const scriptText = segments ? segments.join('\n') : state.audioScripts[index];
+  const segments = flow.audioScriptSegments[index];
+  const scriptText = segments ? segments.join('\n') : flow.audioScripts[index];
   if (!novel || !scriptText) {
     showToast('No script to download. Generate it first.', 'error');
     return;
