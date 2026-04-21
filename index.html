@@ -7,7 +7,7 @@
   <meta name="description"
     content="AI Novel Template Generator — Create multiple novel outlines from a single creative prompt using Google Gemini AI.">
   <title>AI Novel Template Generator</title>
-  <link rel="stylesheet" href="style.css?v=31">
+  <link rel="stylesheet" href="style.css?v=35">
   <link rel="icon"
     href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📚</text></svg>">
 </head>
@@ -93,59 +93,69 @@
             <div class="form-group full-width" id="ai33SettingsGroup" style="display:none">
               <label for="ai33ApiKey">AI33 Pro API Key</label>
               <input type="password" id="ai33ApiKey" placeholder="From ai33.pro" autocomplete="off">
+              <span class="form-hint">When TTS Provider is AI33 Pro, chapter audio, voice demos, and parallel generation use this key only (not the Gemini TTS field).</span>
             </div>
             <div class="form-group" id="ai33BaseUrlGroup" style="display:none">
               <label for="ai33BaseUrl">AI33 Base URL</label>
               <input type="text" id="ai33BaseUrl" placeholder="https://api.ai33.pro/v1" autocomplete="off">
             </div>
-            <div class="form-group">
+            <div class="form-group voice-row-with-demo">
               <label for="narratorVoice">Narrator Voice</label>
-              <select id="narratorVoice">
-                <optgroup label="Gemini voices" data-tts="gemini">
-                  <option value="Charon">Charon</option>
-                  <option value="Schedar">Schedar</option>
-                  <option value="Sulafat">Sulafat</option>
-                  <option value="Kore">Kore</option>
-                  <option value="Puck">Puck</option>
-                  <option value="Orus">Orus</option>
-                </optgroup>
-                <optgroup label="AI33 / OpenAI voices" data-tts="ai33">
-                  <option value="alloy">alloy</option>
-                  <option value="echo">echo</option>
-                  <option value="fable">fable</option>
-                  <option value="onyx">onyx</option>
-                  <option value="nova">nova</option>
-                  <option value="shimmer">shimmer</option>
-                </optgroup>
-              </select>
+              <div class="voice-select-row">
+                <select id="narratorVoice">
+                  <optgroup label="Gemini voices" data-tts="gemini">
+                    <option value="Charon">Charon</option>
+                    <option value="Schedar">Schedar</option>
+                    <option value="Sulafat">Sulafat</option>
+                    <option value="Kore">Kore</option>
+                    <option value="Puck">Puck</option>
+                    <option value="Orus">Orus</option>
+                  </optgroup>
+                  <optgroup label="AI33 / OpenAI voices" data-tts="ai33">
+                    <option value="alloy">alloy</option>
+                    <option value="echo">echo</option>
+                    <option value="fable">fable</option>
+                    <option value="onyx">onyx</option>
+                    <option value="nova">nova</option>
+                    <option value="shimmer">shimmer</option>
+                  </optgroup>
+                </select>
+                <button type="button" class="btn btn-secondary btn-sm demo-voice-btn" id="demoVoice_narratorVoice" title="Play a short sample with the selected voice">▶ Demo</button>
+              </div>
             </div>
-            <div class="form-group">
+            <div class="form-group voice-row-with-demo">
               <label for="femaleVoice">Female Character Voice</label>
-              <select id="femaleVoice">
-                <optgroup label="Gemini" data-tts="gemini">
-                  <option value="Sulafat">Sulafat</option>
-                  <option value="Kore">Kore</option>
-                  <option value="Zephyr">Zephyr</option>
-                </optgroup>
-                <optgroup label="AI33" data-tts="ai33">
-                  <option value="nova">nova</option>
-                  <option value="shimmer">shimmer</option>
-                </optgroup>
-              </select>
+              <div class="voice-select-row">
+                <select id="femaleVoice">
+                  <optgroup label="Gemini" data-tts="gemini">
+                    <option value="Sulafat">Sulafat</option>
+                    <option value="Kore">Kore</option>
+                    <option value="Zephyr">Zephyr</option>
+                  </optgroup>
+                  <optgroup label="AI33" data-tts="ai33">
+                    <option value="nova">nova</option>
+                    <option value="shimmer">shimmer</option>
+                  </optgroup>
+                </select>
+                <button type="button" class="btn btn-secondary btn-sm demo-voice-btn" id="demoVoice_femaleVoice" title="Play a short sample with the selected voice">▶ Demo</button>
+              </div>
             </div>
-            <div class="form-group">
+            <div class="form-group voice-row-with-demo">
               <label for="maleVoice">Male Character Voice</label>
-              <select id="maleVoice">
-                <optgroup label="Gemini" data-tts="gemini">
-                  <option value="Charon">Charon</option>
-                  <option value="Puck">Puck</option>
-                  <option value="Orus">Orus</option>
-                </optgroup>
-                <optgroup label="AI33" data-tts="ai33">
-                  <option value="onyx">onyx</option>
-                  <option value="alloy">alloy</option>
-                </optgroup>
-              </select>
+              <div class="voice-select-row">
+                <select id="maleVoice">
+                  <optgroup label="Gemini" data-tts="gemini">
+                    <option value="Charon">Charon</option>
+                    <option value="Puck">Puck</option>
+                    <option value="Orus">Orus</option>
+                  </optgroup>
+                  <optgroup label="AI33" data-tts="ai33">
+                    <option value="onyx">onyx</option>
+                    <option value="alloy">alloy</option>
+                  </optgroup>
+                </select>
+                <button type="button" class="btn btn-secondary btn-sm demo-voice-btn" id="demoVoice_maleVoice" title="Play a short sample with the selected voice">▶ Demo</button>
+              </div>
             </div>
           </div>
 
@@ -214,6 +224,7 @@
         <span class="collapse-icon" id="templateDetailsIcon">▼</span>
       </div>
       <div class="collapsible-body" id="templateDetails">
+        <p class="form-hint" style="margin:0 0 12px">All of this is optional. The generator fills draft script, characters, author, dates, category, narrator tone, and background automatically from your master prompt—you can review and edit results afterward.</p>
         <div class="form-grid">
           <div class="form-group full-width">
             <label for="draftScript">Draft Script & Core Ideas</label>
@@ -321,10 +332,19 @@
 
     <!-- ======== GENERATE ======== -->
     <div class="generate-actions">
-      <button class="btn btn-primary" id="generateBtn">
-        <span class="spinner"></span>
-        <span class="btn-text">✨ Generate Novel Templates</span>
-      </button>
+      <div class="generate-actions-buttons">
+        <button class="btn btn-primary" id="generateBtn">
+          <span class="spinner"></span>
+          <span class="btn-text">✨ Generate Novel Templates</span>
+        </button>
+        <button type="button" class="btn btn-secondary" id="newParallelRunBtn" title="Creates a new tab and runs this brief in parallel with other flows">
+          <span class="btn-text">⧉ New parallel run</span>
+        </button>
+      </div>
+      <label class="form-hint" style="display:flex;align-items:flex-start;gap:10px;margin-top:14px;max-width:42rem;cursor:pointer;line-height:1.45">
+        <input type="checkbox" id="autoGenerateStoriesAfterTemplates" style="margin-top:3px;flex-shrink:0" />
+        <span>After templates finish, automatically run <strong>Generate All Stories</strong> (full chapter prose from each template above). Uses your API key(s); you can still edit text afterward.</span>
+      </label>
     </div>
 
     <!-- ======== PROGRESS ======== -->
@@ -337,6 +357,10 @@
 
     <!-- ======== RESULTS ======== -->
     <section class="results-section" id="resultsSection">
+      <div class="flow-tabs-wrap">
+        <div class="flow-tabs-bar" id="flowTabsBar" role="tablist" aria-label="Generation runs"></div>
+        <p class="flow-status-line" id="flowStatusLine"></p>
+      </div>
       <div class="results-header">
         <h2>📚 Generated Novels</h2>
         <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
@@ -371,9 +395,9 @@
           Generate novel thumbnails
           <span class="optional-badge">3:4 ratio</span>
         </div>
-        <p class="form-hint" style="margin-top: 8px;">Generate a 3:4 portrait thumbnail for each novel from its template (title, genre, synopsis, mood). Use the button above for all novels, or the per-novel button on each card.</p>
+        <p class="form-hint" style="margin-top: 8px;">Generates a 3:4 cover from each template: artwork reflects synopsis, draft ideas, themes, and setting; the <strong>novel title</strong> is rendered as readable typography. Use the button above for all novels, or the per-novel button on each card.</p>
       </div>
-      <div id="novelsContainer"></div>
+      <div id="flowPanelsContainer" class="flow-panels-container"></div>
     </section>
 
   </div>
@@ -383,7 +407,7 @@
 
   <script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
-  <script src="app.js?v=40"></script>
+  <script src="app.js?v=54"></script>
 </body>
 
 </html>
