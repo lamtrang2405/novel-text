@@ -1244,7 +1244,12 @@ function looksLikeSinoVietnameseName(name) {
   const parts = n.split(' ').filter(Boolean);
   if (parts.length < 2 || parts.length > 3) return false;
   const first = parts[0];
-  const firstAscii = first.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  let firstAscii = first;
+  try {
+    firstAscii = first.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  } catch (_) {
+    firstAscii = first;
+  }
   return SINO_VIET_SURNAMES.includes(first) || SINO_VIET_SURNAMES.includes(firstAscii);
 }
 
