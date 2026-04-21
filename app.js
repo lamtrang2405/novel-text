@@ -1253,15 +1253,15 @@ function storyIsCompleteForNovel(flowId, index, novel) {
 /** Export column order (one row per chapter/episode) */
 const EXPORT_HEADERS = [
   'title',
-  'description',
-  'premiumStatus',
+  'author',
+  'summary',
   'tags',
-  'categoryNames',
-  'collectionNames',
-  'authorNames',
-  'narratorNames',
-  'episodeTitle',
-  'episodeContent',
+  'completionStatus',
+  'totalChapter',
+  'thumbnailUrl',
+  'category',
+  'chapterTitle',
+  'chapterContent',
 ];
 
 /** Build one row per chapter for a novel. Each row has same novel metadata + one chapter_outline and chapter_content. */
@@ -1282,28 +1282,28 @@ function buildExportRowsForNovel(flowId, novelIndex, novel, collection) {
   const allNums = [...new Set([...Object.keys(outlineByNum).map(Number), ...Object.keys(contentByNum).map(Number)])].sort((a, b) => a - b);
   const rows = [];
   const title = safeStr(novel.title);
-  const description = clampText(safeStr(novel.overview || novel.synopsis), 500);
-  const premiumStatus = safeStr(novel.premiumStatus || novel.premium) || 'yes';
+  const author = safeStr(novel.authorName || novel.author) || safeStr(document.getElementById('authorName')?.value) || 'Anonymous';
+  const summary = clampText(safeStr(novel.overview || novel.synopsis), 500);
   const tags = getTagsForExport(novel);
-  const categoryNames = getCategoriesForExport(novel);
-  const collectionNames = safeStr(novel.collection) || collection;
-  const authorNames = safeStr(novel.authorName || novel.author) || safeStr(document.getElementById('authorName')?.value) || 'Anonymous';
-  const narratorNames = safeStr(novel.narratorNames || novel.narratorName || novel.narratorTone) || safeStr(document.getElementById('narratorTone')?.value) || '';
+  const completionStatus = storyIsCompleteForNovel(flowId, novelIndex, novel) ? 'completed' : 'draft';
+  const totalChapter = allNums.length || (Array.isArray(templateChapters) ? templateChapters.length : 0);
+  const thumbnailUrl = safeStr(novel.thumbnail || novel.cover || '');
+  const category = getCategoriesForExport(novel);
 
   if (allNums.length === 0) {
-    rows.push([title, description, premiumStatus, tags, categoryNames, collectionNames, authorNames, narratorNames, '', '']);
+    rows.push([title, author, summary, tags, completionStatus, totalChapter, thumbnailUrl, category, '', '']);
     return rows;
   }
   allNums.forEach(num => {
     rows.push([
       title,
-      description,
-      premiumStatus,
+      author,
+      summary,
       tags,
-      categoryNames,
-      collectionNames,
-      authorNames,
-      narratorNames,
+      completionStatus,
+      totalChapter,
+      thumbnailUrl,
+      category,
       outlineByNum[num] || `Chapter ${num}`,
       contentByNum[num] || '',
     ]);
@@ -1584,10 +1584,10 @@ async function handleExportXlsx(options = {}) {
     const collection = getExportCollection();
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet('Novels');
-    ws.columns = EXPORT_HEADERS.map((h, idx) => ({
+    ws.columns = EXPORT_HEADERS.map((h) => ({
       header: h,
       key: h,
-      width: h === 'episodeContent' || h === 'description' ? 60 : h === 'episodeTitle' ? 48 : 20,
+      width: h === 'chapterContent' || h === 'summary' ? 60 : h === 'chapterTitle' ? 48 : 20,
     }));
     ws.getRow(1).font = { bold: true };
     ws.getRow(1).alignment = { vertical: 'middle' };
@@ -1598,18 +1598,9 @@ async function handleExportXlsx(options = {}) {
       const novel = flow.novels[i] || {};
       const rows = buildExportRowsForNovel(flowId, i, novel, collection);
       rows.forEach(row => {
-        ws.addRow({
-          title: row[0],
-          description: row[1],
-          premiumStatus: row[2],
-          tags: row[3],
-          categoryNames: row[4],
-          collectionNames: row[5],
-          authorNames: row[6],
-          narratorNames: row[7],
-          episodeTitle: row[8],
-          episodeContent: row[9],
-        });
+        const rowObj = {};
+        EXPORT_HEADERS.forEach((key, idx) => { rowObj[key] = row[idx]; });
+        ws.addRow(rowObj);
         ws.getRow(rowNumber).alignment = { vertical: 'top', wrapText: true };
         ws.getRow(rowNumber).height = 24;
         rowNumber++;
