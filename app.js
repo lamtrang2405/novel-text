@@ -777,12 +777,32 @@ function validateStoryAgainstTemplateProgrammatic(flowId, index) {
     return { ok: false, issues };
   }
   const outline = novel.chapters || [];
-  const expectedN = outline.filter((c) => parseInt(c?.chapterNumber, 10) >= 1).length;
+  const expectedNums = outline
+    .map((c) => parseInt(c?.chapterNumber, 10))
+    .filter((n) => !Number.isNaN(n) && n >= 1)
+    .sort((a, b) => a - b);
+  const expectedN = expectedNums.length;
   const parsed = parseChaptersFromMarkers(storyText);
-  if (expectedN > 0 && parsed.length > 0 && parsed.length !== expectedN) {
+  if (expectedN > 0 && parsed.length !== expectedN) {
     issues.push(
       `Chapter count mismatch: full story has ${parsed.length} [CHAPTER] block(s); template outline has ${expectedN}.`,
     );
+  }
+  if (parsed.length) {
+    const parsedNums = parsed
+      .map((ch) => parseInt(ch?.number, 10))
+      .filter((n) => !Number.isNaN(n) && n >= 1)
+      .sort((a, b) => a - b);
+    const missing = expectedNums.filter((n) => !parsedNums.includes(n));
+    if (missing.length) {
+      issues.push(`Missing chapter block(s): ${missing.join(', ')}.`);
+    }
+    parsed.forEach((ch) => {
+      const bodyLen = safeStr(ch?.content).length;
+      if (bodyLen < 180) {
+        issues.push(`Chapter ${ch.number} is too short (${bodyLen} chars).`);
+      }
+    });
   }
   const names = (novel.characters || []).map((c) => safeStr(c.name).trim()).filter(Boolean);
   const lower = storyText.toLowerCase();
@@ -792,6 +812,25 @@ function validateStoryAgainstTemplateProgrammatic(flowId, index) {
     if (!hit) issues.push(`Character "${fullName}" may be absent from the prose — verify manually.`);
   });
   return { ok: issues.length === 0, issues };
+}
+
+function updateStoryButtonReviewState(flowId, index) {
+  const flow = getFlow(flowId);
+  const novel = flow?.novels?.[index];
+  const fd = flowDomId(flowId);
+  const btn = document.getElementById(`storyBtn_${fd}_${index}`);
+  if (!btn || !novel) return;
+  const status = getNovelCompletionStatus(flowId, index, novel);
+  const txt = btn.querySelector('.btn-text');
+  if (txt) {
+    if (status === 'generated finished') txt.textContent = '✅ Generated finished';
+    else if (status === 'generated') txt.textContent = '✅ Story Generated';
+    else txt.textContent = '📖 Generate Full Story';
+  } else {
+    if (status === 'generated finished') btn.innerHTML = '<span class="btn-text">✅ Generated finished</span>';
+    else if (status === 'generated') btn.innerHTML = '<span class="btn-text">✅ Story Generated</span>';
+    else btn.innerHTML = '<span class="btn-text">📖 Generate Full Story</span>';
+  }
 }
 
 async function callStoryAlignmentReviewLLM(novel, storyText, apiKeyOverride) {
@@ -880,6 +919,7 @@ async function runAutoReviewStoryStep(flowId, index, apiKeyOverride) {
     `;
     el.style.display = 'block';
   }
+  updateStoryButtonReviewState(flowId, index);
 }
 
 function getExampleFullStory(index) {
@@ -1250,6 +1290,12 @@ function storyIsCompleteForNovel(flowId, index, novel) {
   });
 }
 
+function getNovelCompletionStatus(flowId, index, novel) {
+  const reviewedOk = !!(novel?._autoReview?.story?.ok);
+  if (reviewedOk) return 'generated finished';
+  return storyIsCompleteForNovel(flowId, index, novel) ? 'generated' : 'draft';
+}
+
 /** Export column order (one row per chapter/episode) */
 const EXPORT_HEADERS = [
   'title',
@@ -1285,7 +1331,7 @@ function buildExportRowsForNovel(flowId, novelIndex, novel, collection) {
   const author = safeStr(novel.authorName || novel.author) || safeStr(document.getElementById('authorName')?.value) || 'Anonymous';
   const summary = clampText(safeStr(novel.overview || novel.synopsis), 500);
   const tags = getTagsForExport(novel);
-  const completionStatus = storyIsCompleteForNovel(flowId, novelIndex, novel) ? 'completed' : 'draft';
+  const completionStatus = getNovelCompletionStatus(flowId, novelIndex, novel);
   const totalChapter = allNums.length || (Array.isArray(templateChapters) ? templateChapters.length : 0);
   const thumbnailUrl = safeStr(novel.thumbnail || novel.cover || '');
   const category = getCategoriesForExport(novel);
@@ -3657,11 +3703,11 @@ Rules:
     renderStoryChapters(flowId, index, storyText);
     if (storySection) storySection.style.display = 'block';
 
-    void runAutoReviewStoryStep(flowId, index, apiKeyOverride).catch((e) => console.warn('Auto-review story', e));
+    await runAutoReviewStoryStep(flowId, index, apiKeyOverride).catch((e) => console.warn('Auto-review story', e));
 
     // Update button
     if (btn) {
-      btn.innerHTML = '<span class="btn-text">✅ Story Generated</span>';
+      updateStoryButtonReviewState(flowId, index);
       btn.classList.remove('loading');
     }
 
