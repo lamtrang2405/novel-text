@@ -743,6 +743,14 @@ function validateTemplateForAutoReview(novel) {
   if (!Array.isArray(novel.chapters) || novel.chapters.length < 2) {
     issues.push('Chapter outline should have at least two chapters.');
   }
+  if (isVietnameseWritingLanguage(novel.writingLanguage)) {
+    (chars || []).forEach((c) => {
+      const nm = safeStr(c?.name);
+      if (!looksLikeSinoVietnameseName(nm)) {
+        issues.push(`Character "${nm || '(empty)'}" should use Sino-Vietnamese Chinese-style naming (e.g. "Lâm Hải", "Lâm Vi").`);
+      }
+    });
+  }
   const ov = safeStr(novel.overview);
   if (!ov || ov === 'N/A' || ov.length < 120) {
     issues.push('Overview should be a full-meaning summary (aim for 300+ characters).');
@@ -754,6 +762,7 @@ function applyAutoReviewTemplateToNovels(novels) {
   if (!Array.isArray(novels)) return;
   novels.forEach((novel) => {
     if (!novel || typeof novel !== 'object') return;
+    enforceSinoVietnameseCharacterNames(novel);
     synchronizeCharacterSystem(novel);
     novel._autoReview = novel._autoReview || {};
     novel._autoReview.template = validateTemplateForAutoReview(novel);
@@ -1213,6 +1222,59 @@ function pickRandomAuthorName() {
   const first = RANDOM_FIRST[Math.floor(Math.random() * RANDOM_FIRST.length)];
   const last = RANDOM_LAST[Math.floor(Math.random() * RANDOM_LAST.length)];
   return `${first} ${last}`;
+}
+
+function isVietnameseWritingLanguage(lang) {
+  const s = safeStr(lang).toLowerCase();
+  return s.includes('vietnamese') || s.includes('tiếng việt') || s === 'vietnam';
+}
+
+const SINO_VIET_SURNAMES = [
+  'Lâm', 'Trần', 'Lý', 'Triệu', 'Tô', 'Tạ', 'Chu', 'Hà', 'Vương', 'Dương', 'Tần', 'Mạc', 'Tống', 'Lục', 'Thẩm', 'Bạch', 'Phong',
+  'Lam', 'Tran', 'Ly', 'Trieu', 'To', 'Ta', 'Chu', 'Ha', 'Vuong', 'Duong', 'Tan', 'Mac', 'Tong', 'Luc', 'Tham', 'Bach', 'Phong',
+];
+const SINO_VIET_GIVEN = [
+  'Hải', 'Vi', 'Vân', 'Nhi', 'Nguyệt', 'Mộng', 'Uyên', 'Thanh', 'Tâm', 'Yên', 'Diệp', 'Kha', 'Mặc', 'Thiên', 'Tử', 'Kiệt', 'Dật', 'Phi', 'Sương', 'Lạc',
+  'Hai', 'Vi', 'Van', 'Nhi', 'Nguyet', 'Mong', 'Uyen', 'Thanh', 'Tam', 'Yen', 'Diep', 'Kha', 'Mac', 'Thien', 'Tu', 'Kiet', 'Dat', 'Phi', 'Suong', 'Lac',
+];
+
+function looksLikeSinoVietnameseName(name) {
+  const n = safeStr(name).replace(/\s+/g, ' ').trim();
+  if (!n) return false;
+  const parts = n.split(' ').filter(Boolean);
+  if (parts.length < 2 || parts.length > 3) return false;
+  const first = parts[0];
+  const firstAscii = first.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  return SINO_VIET_SURNAMES.includes(first) || SINO_VIET_SURNAMES.includes(firstAscii);
+}
+
+function makeSinoVietnameseName(seed, usedSet) {
+  for (let i = 0; i < 100; i++) {
+    const s = SINO_VIET_SURNAMES[(seed + i) % SINO_VIET_SURNAMES.length];
+    const g1 = SINO_VIET_GIVEN[(seed * 3 + i) % SINO_VIET_GIVEN.length];
+    const g2 = SINO_VIET_GIVEN[(seed * 7 + i + 5) % SINO_VIET_GIVEN.length];
+    const candidate = `${s} ${g1}` + ((seed + i) % 3 === 0 ? ` ${g2}` : '');
+    const key = candidate.toLowerCase();
+    if (!usedSet.has(key)) {
+      usedSet.add(key);
+      return candidate;
+    }
+  }
+  const fallback = `Lâm Vi ${seed + 1}`;
+  usedSet.add(fallback.toLowerCase());
+  return fallback;
+}
+
+function enforceSinoVietnameseCharacterNames(novel) {
+  if (!novel || !isVietnameseWritingLanguage(novel.writingLanguage)) return;
+  const chars = Array.isArray(novel.characters) ? novel.characters : [];
+  const used = new Set(chars.map((c) => safeStr(c?.name).toLowerCase()).filter(Boolean));
+  chars.forEach((c, idx) => {
+    if (!c || typeof c !== 'object') return;
+    const current = safeStr(c.name);
+    if (looksLikeSinoVietnameseName(current)) return;
+    c.name = makeSinoVietnameseName(idx + 11, used);
+  });
 }
 
 function getExportCollection() {
@@ -2083,6 +2145,10 @@ function buildGeminiPrompt(formData) {
     ? `The brief suggests category "${selectedCat}". Use that exact string for "category" and "cateogories" on every novel unless it clearly conflicts with the story; if it conflicts, pick the closest allowed category.`
     : `For each novel, choose one "category" from the allowed list that best fits the story. Set "cateogories" to the same string as "category".`;
 
+  const vietnameseNameRule = isVietnameseWritingLanguage(formData.writingLanguage)
+    ? `\n- **Character naming rule (MANDATORY for Vietnamese output):** Use Sino-Vietnamese Chinese-style names for ALL characters (examples: "Lâm Hải", "Lâm Vi", "Triệu Mặc", "Tần Nguyệt"). Do NOT use Western names like Emma, James, Alex, etc.`
+    : '';
+
   prompt += `
 
 ## AUTO-GENERATION (DEFAULT)
@@ -2092,6 +2158,7 @@ You invent the full content of every template field. The human will only supply 
 - **Draft Script & Core Ideas / Character System / Narrator Tone & Background / Author / Date / Category / Collection:** If provided, weave them in; otherwise ignore and create coherent values from the Master Prompt.
 - **narratorTone** vs **background:** Split narrative voice/POV/mood into "narratorTone"; world/setting/atmosphere into "background". If you only have one combined idea, split it sensibly—both must be substantive.
 - **category:** ${categoryBinding}
+${vietnameseNameRule}
 
 ## OUTPUT REQUIREMENTS
 Generate exactly ${formData.numNovels} novel templates. Each novel template MUST include ALL of the following fields:
@@ -3625,6 +3692,7 @@ async function generateFullStory(flowId, index, apiKeyOverride, options = {}) {
   }
 
   try {
+    enforceSinoVietnameseCharacterNames(novel);
     // Build chapter details for the prompt
     let chapterDetails = '';
     if (novel.chapters && novel.chapters.length) {
@@ -3692,6 +3760,7 @@ Rules:
 - Match the number of [CHAPTER n] blocks to the chapter outline (if the outline lists 7 chapters, output 7 blocks).
 - CHARACTER SYNC: Every character listed under CHARACTERS must appear in the story by name (or clear nickname established in prose), with roles and arcs consistent with the template—do not replace them with different people.
 - TEMPLATE FIDELITY: The plot, stakes, and setting must follow the DRAFT SCRIPT & CORE IDEAS and CHAPTER OUTLINE; do not invent an unrelated story.
+${isVietnameseWritingLanguage(novel.writingLanguage) ? '- NAME STYLE RULE: Keep all character names in Sino-Vietnamese Chinese style exactly as listed in the template (e.g., Lâm Hải, Lâm Vi). Do NOT replace them with Western names.' : ''}
 `;
 
     const storyText = await callGeminiAPIRawWithKey(storyPrompt, apiKeyOverride);
