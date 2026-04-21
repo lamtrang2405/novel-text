@@ -2620,8 +2620,15 @@ async function runFlowGenerate(flowId) {
     flow.status = 'error';
     flow.errorMessage = error?.message || String(error);
     let msg = flow.errorMessage;
-    if (msg === 'Failed to fetch' || msg.includes('NetworkError')) {
-      msg = 'Network error. If using file://, run: npx serve -l 3000 and open http://localhost:3000';
+    if (msg === 'Failed to fetch' || msg.includes('NetworkError') || msg.includes('TypeError: Failed to fetch')) {
+      if (getAIProvider() === 'deepseek') {
+        msg = 'DeepSeek request failed in browser (likely CORS or blocked network). Try AI Provider = Google Gemini, or use a backend proxy for DeepSeek.';
+      } else {
+        const proto = (typeof location !== 'undefined' && location.protocol) ? location.protocol : '';
+        msg = proto === 'file:'
+          ? 'Network error on file://. Run: npx serve -l 3000 and open http://localhost:3000'
+          : 'Network error. Check internet, disable blockers/VPN, and verify browser can reach Google AI API.';
+      }
     }
     showToast('Generation failed: ' + msg, 'error');
   } finally {
